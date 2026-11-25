@@ -14,7 +14,7 @@
   },
   "type": "module",
   "bin": {
-    "narc": "./dist/cli.js"
+    "narc": "dist/cli.js"
   },
   "files": [
     "dist",
