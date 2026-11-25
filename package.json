@@ -1,0 +1,56 @@
+{
+  "name": "narcx",
+  "version": "0.2.0",
+  "description": "Catch any CLI tool, AI coding harness, or MCP server red-handed when it phones home or reads your dotfiles.",
+  "license": "MIT",
+  "author": "arrrshia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arrrshia/narcx.git"
+  },
+  "homepage": "https://github.com/arrrshia/narcx#readme",
+  "bugs": {
+    "url": "https://github.com/arrrshia/narcx/issues"
+  },
+  "type": "module",
+  "bin": {
+    "narc": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets/fonts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "demo": "node dist/cli.js --demo --card ./demo-report.png",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+  },
+  "keywords": [
+    "privacy",
+    "telemetry",
+    "audit",
+    "cli",
+    "mcp",
+    "ai",
+    "security",
+    "proxy"
+  ],
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

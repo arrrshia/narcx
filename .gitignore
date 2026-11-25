@@ -1,0 +1,6 @@
+node_modules
+dist
+*.png
+narc-report.json
+audit-results/
+!docs/*.png
