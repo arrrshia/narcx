@@ -13,6 +13,8 @@ export interface FsUsageLine {
   pathTail: string | null;
   procName: string;
   tid: number | null;
+  /** errno when the call failed (e.g. 2 = ENOENT), else null. */
+  errno: number | null;
 }
 
 /**
@@ -26,14 +28,18 @@ export function parseFsUsageLine(line: string): FsUsageLine | null {
   if (!m) return null;
   const call = m[1] ?? "";
   let middle = (m[2] ?? "").trim();
+  let errno: number | null = null;
+  const err = /\[\s*(\d+)\]/.exec(middle);
+  if (err) errno = Number(err[1]);
   middle = middle
     .replace(/^F=-?\d+\s*/, "")
     .replace(/^B=0x[0-9a-fA-F]+\s*/, "")
     .replace(/^\[\s*\d+\]\s*/, "")
     .replace(/^\([^)]*\)\s*/, "")
+    .replace(/^\[\s*\d+\]\s*/, "")
     .trim();
   const pathTail = middle.length ? middle : null;
-  return { call, pathTail, procName: m[4] ?? "", tid: m[5] ? Number(m[5]) : null };
+  return { call, pathTail, procName: m[4] ?? "", tid: m[5] ? Number(m[5]) : null, errno };
 }
 
 const OPEN_CALLS = new Set([
@@ -120,7 +126,8 @@ export function startFsUsage(opts: {
       if (!nameInTree(parsed.procName, tree)) continue;
       const full = reconstructPath(parsed.pathTail, home);
       if (!full) continue;
-      collector.addFile({ source: "fs_usage", path: full, op: parsed.call, proc: tree.displayNameFor(parsed.procName) });
+      // A failed open (errno set, e.g. ENOENT) is a probe of a path that is not there, not a read.
+      collector.addFile({ source: "fs_usage", path: full, op: parsed.call, proc: tree.displayNameFor(parsed.procName), exists: parsed.errno === null });
     }
   });
 

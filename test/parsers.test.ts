@@ -71,9 +71,11 @@ describe("strace parsing", () => {
 describe("fs_usage parsing", () => {
   it("parses wide-format lines", () => {
     const l = parseFsUsageLine("22:31:05.123456  open              F=5        (R_____)  /Users/x/.ssh/id_rsa       0.000012   node.1234567");
-    expect(l).toEqual({ call: "open", pathTail: "/Users/x/.ssh/id_rsa", procName: "node", tid: 1234567 });
+    expect(l).toEqual({ call: "open", pathTail: "/Users/x/.ssh/id_rsa", procName: "node", tid: 1234567, errno: null });
     const w = parseFsUsageLine("22:31:05.123456  openat            [  2]      (R_____)  rshia/.aws/credentials      0.000050 W python3.99");
-    expect(w).toEqual({ call: "openat", pathTail: "rshia/.aws/credentials", procName: "python3", tid: 99 });
+    expect(w).toEqual({ call: "openat", pathTail: "rshia/.aws/credentials", procName: "python3", tid: 99, errno: 2 });
+    const e = parseFsUsageLine("22:31:05.123456  open              F=-1  [  2]  (R_____)  /Users/x/.npmrc      0.000010   node.5");
+    expect(e).toEqual({ call: "open", pathTail: "/Users/x/.npmrc", procName: "node", tid: 5, errno: 2 });
     expect(parseFsUsageLine("garbage")).toBeNull();
   });
 
@@ -95,7 +97,7 @@ describe("fs_usage parsing", () => {
 
   it("accepts AT_FDCWD style negative descriptors in the fd column", () => {
     const w = parseFsUsageLine("22:31:05.123456  openat            F=-2       (R_____)  /Users/x/.claude.json      0.000050 W claude.99");
-    expect(w).toEqual({ call: "openat", pathTail: "/Users/x/.claude.json", procName: "claude", tid: 99 });
+    expect(w).toEqual({ call: "openat", pathTail: "/Users/x/.claude.json", procName: "claude", tid: 99, errno: null });
   });
 });
 
@@ -127,6 +129,17 @@ describe("PidTree", () => {
     t.ingest(["100     1 /usr/bin/node"].join("\n"), "100 node"); // 101 exited
     expect(t.pids()).toEqual([100]);
     expect(t.seenProcesses().map((p) => p.ucomm)).toEqual(["node", "2.1.323"]);
+  });
+
+  it("names interpreter processes by the script they run", () => {
+    const mk = (comm: string, ucomm: string, args: string) => ({ pid: 1, ppid: 0, comm, ucomm, args });
+    expect(PidTree.displayName(mk("/usr/local/bin/node", "node", "/usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js view @openai/codex"))).toBe("npm");
+    expect(PidTree.displayName(mk("/usr/local/bin/node", "node", "node /tmp/tools/node_modules/.bin/t3"))).toBe("t3");
+    expect(PidTree.displayName(mk("/usr/local/bin/node", "node", "node --require /x/preload.cjs /srv/app/server.mjs"))).toBe("server");
+    expect(PidTree.displayName(mk("/usr/local/bin/node", "node", "node -e console.log(1)"))).toBe("node");
+    expect(PidTree.displayName(mk("/bin/bash", "bash", "bash -c sleep 1"))).toBe("bash");
+    expect(PidTree.displayName(mk("/Users/u/.local/bin/claude", "2.1.323", "claude -p hi"))).toBe("claude");
+    expect(PidTree.displayName(mk("/opt/codex/bin/codex", "codex", "codex exec hi"))).toBe("codex");
   });
 
   it("finds processes the tool left running after it exited", () => {

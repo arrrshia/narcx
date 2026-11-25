@@ -278,7 +278,8 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
   // ---- footer ----------------------------------------------------------------
   const footRule = 595;
   p.push(hr(M, R, footRule));
-  p.push(text(M, footRule + 24, "out-of-the-box defaults · no TLS interception · zero auditor network calls", { size: 12, family: MONO, fill: MUTED }));
+  const footer = report.footer || "out-of-the-box defaults · no TLS interception · zero auditor network calls";
+  p.push(text(M, footRule + 24, fit(footer, Math.floor((R - M - 120) / (12 * CH))), { size: 12, family: MONO, fill: MUTED }));
   p.push(text(R, footRule + 24, "npx narcx", { size: 15, family: MONO, weight: 700, anchor: "end" }));
 
   p.push("</svg>");

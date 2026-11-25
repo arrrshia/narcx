@@ -2,5 +2,5 @@ node_modules
 dist
 *.png
 narc-report.json
-audit-results/
+audit-results*/
 !docs/*.png

@@ -8,6 +8,30 @@ export interface ProcInfo {
   comm: string;
   /** Kernel accounting name (`ps -o ucomm`, 16 chars max): what fs_usage prints. */
   ucomm: string;
+  /** Full command line (`ps -o args`), used to name interpreter processes by their script. */
+  args: string;
+}
+
+const INTERPRETERS = new Set(["node", "nodejs", "bun", "deno", "python", "python3", "python2", "perl", "ruby", "sh", "bash", "zsh", "dash", "fish"]);
+/** Interpreter flags that consume the next token. */
+const FLAGS_WITH_VALUE = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "--max-old-space-size", "-m", "-W"]);
+/** Flags after which the "script" is inline code, so no script name exists. */
+const INLINE_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-c"]);
+
+/** First script path on an interpreter command line, or null for inline code / REPLs. */
+function scriptOf(args: string): string | null {
+  const toks = args.split(/\s+/).filter(Boolean);
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i]!;
+    if (INLINE_FLAGS.has(t)) return null;
+    if (FLAGS_WITH_VALUE.has(t)) {
+      i++;
+      continue;
+    }
+    if (t.startsWith("-")) continue;
+    return t;
+  }
+  return null;
 }
 
 /**
@@ -71,11 +95,24 @@ export class PidTree {
     return this.procs.get(pid) ?? this.everSeen.get(pid);
   }
 
-  /** Human name for a process: the accounting name unless it is just a version string (`2.1.323`). */
+  /**
+   * Human name for a process: the accounting name, unless it is a bare
+   * version string (`2.1.323` -> executable name) or an interpreter, in which
+   * case the script it runs names it (`node npm-cli.js` -> `npm`).
+   */
   static displayName(p: ProcInfo): string {
     const exe = path.basename(p.comm.split(" ")[0] ?? p.comm);
-    if (!p.ucomm || /^[\d.]+$/.test(p.ucomm)) return exe;
-    return p.ucomm;
+    const base = !p.ucomm || /^[\d.]+$/.test(p.ucomm) ? exe : p.ucomm;
+    if (INTERPRETERS.has(base) || INTERPRETERS.has(exe)) {
+      const script = p.args ? scriptOf(p.args) : null;
+      if (script) {
+        let n = path.basename(script).replace(/\.(c|m)?js$|\.py$|\.rb$|\.pl$|\.sh$/, "");
+        if (n === "npm-cli") n = "npm";
+        else if (n === "npx-cli") n = "npx";
+        if (n) return n;
+      }
+    }
+    return base;
   }
 
   /** Short display name for a pid seen at any point during the run. */
@@ -122,20 +159,27 @@ export class PidTree {
           return resolve();
         }
         execFile("ps", ["-axo", "pid=,ucomm="], { maxBuffer: 16 * 1024 * 1024, timeout: 2000 }, (err2, names) => {
-          this.running = false;
-          this.ingest(stdout, err2 ? "" : names);
-          resolve();
+          execFile("ps", ["-axo", "pid=,args="], { maxBuffer: 32 * 1024 * 1024, timeout: 2000 }, (err3, argv) => {
+            this.running = false;
+            this.ingest(stdout, err2 ? "" : names, err3 ? "" : argv);
+            resolve();
+          });
         });
       });
     });
   }
 
-  /** Parse `ps -axo pid=,ppid=,comm=` (+ optional `ps -axo pid=,ucomm=`) output and recompute the tree. */
-  ingest(psOutput: string, ucommOutput = ""): void {
+  /** Parse `ps -axo pid=,ppid=,comm=` (+ optional `ps -axo pid=,ucomm=` and `ps -axo pid=,args=`) output and recompute the tree. */
+  ingest(psOutput: string, ucommOutput = "", argsOutput = ""): void {
     const ucomms = new Map<number, string>();
     for (const raw of ucommOutput.split("\n")) {
       const m = /^\s*(\d+)\s+(.*)$/.exec(raw);
       if (m) ucomms.set(Number(m[1]), (m[2] ?? "").trim());
+    }
+    const argv = new Map<number, string>();
+    for (const raw of argsOutput.split("\n")) {
+      const m = /^\s*(\d+)\s+(.*)$/.exec(raw);
+      if (m) argv.set(Number(m[1]), (m[2] ?? "").trim());
     }
     const procs = new Map<number, ProcInfo>();
     for (const raw of psOutput.split("\n")) {
@@ -143,7 +187,7 @@ export class PidTree {
       if (!m) continue;
       const pid = Number(m[1]);
       const comm = (m[3] ?? "").trim();
-      procs.set(pid, { pid, ppid: Number(m[2]), comm, ucomm: ucomms.get(pid) ?? "" });
+      procs.set(pid, { pid, ppid: Number(m[2]), comm, ucomm: ucomms.get(pid) ?? "", args: argv.get(pid) ?? "" });
     }
     const children = new Map<number, number[]>();
     for (const p of procs.values()) {
@@ -169,7 +213,7 @@ export class PidTree {
       if (!p) continue;
       const prev = this.everSeen.get(pid);
       // Keep the latest image: a wrapper that exec()s into a native binary keeps its pid.
-      if (!prev || prev.comm !== p.comm || (!prev.ucomm && p.ucomm)) this.everSeen.set(pid, p);
+      if (!prev || prev.comm !== p.comm || (!prev.ucomm && p.ucomm) || (!prev.args && p.args)) this.everSeen.set(pid, p);
     }
   }
 }

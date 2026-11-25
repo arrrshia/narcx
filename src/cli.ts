@@ -31,6 +31,7 @@ interface Options {
   render: string | null;
   regrade: string | null;
   title: string | null;
+  footer: string | null;
   quiet: boolean;
   verbose: boolean;
   lsof: boolean;
@@ -54,6 +55,7 @@ ${pc.bold("OPTIONS")}
   --render <json>   Re-render the scorecard (terminal + --card PNG) from a saved --json report
   --regrade <json>  Rebuild a saved report's summaries and grade from its events under the current rules (writes it back)
   --title <text>    Display name for the scorecard, e.g. "Claude Code 2.1.323" (default: command basename)
+  --footer <text>   Left footer line on the card, e.g. "T3CODE_TELEMETRY_ENABLED=false · no TLS interception"
   -v, --verbose     Also show LLM API traffic, dotfile reads and repeat requests live
   -q, --quiet       No live alerts, only the exit scorecard
   --no-lsof         Disable the lsof socket poller
@@ -85,6 +87,7 @@ function parseArgs(argv: string[]): Options {
     render: null,
     regrade: null,
     title: null,
+    footer: null,
     quiet: false,
     verbose: false,
     lsof: true,
@@ -118,6 +121,8 @@ function parseArgs(argv: string[]): Options {
     else if (a.startsWith("--regrade=")) o.regrade = a.slice(10);
     else if (a === "--title") o.title = argv[++i] ?? fail("--title needs a value");
     else if (a.startsWith("--title=")) o.title = a.slice(8);
+    else if (a === "--footer") o.footer = argv[++i] ?? fail("--footer needs a value");
+    else if (a.startsWith("--footer=")) o.footer = a.slice(9);
     else if (a === "-q" || a === "--quiet") o.quiet = true;
     else if (a === "-v" || a === "--verbose") o.verbose = true;
     else if (a === "--no-lsof") o.lsof = false;
@@ -181,6 +186,7 @@ function loadReport(file: string, opts: Options): { src: string; report: AuditRe
   if (!report.score || !Array.isArray(report.hosts)) fail(`${src} is not a narc JSON report`);
   // Backfill fields older reports may lack.
   report.title = opts.title ?? report.title ?? path.basename(report.command[0] ?? "narc");
+  if (opts.footer) report.footer = opts.footer;
   report.suppressedHosts ??= [];
   report.probedFiles ??= [];
   report.leftoverProcesses ??= [];
@@ -463,6 +469,7 @@ async function main(): Promise<void> {
   const report: AuditReport = {
     narcVersion: VERSION,
     title: opts.title ?? (demo ? "shady-ai-tool" : path.basename(command[0] ?? "narc")),
+    footer: opts.footer ?? undefined,
     platform: `${process.platform}-${process.arch}`,
     command,
     commandLabel: demo ? "shady-ai-tool  (narc --demo fixture)" : shellJoin(displayCommand(command, matcher.homes)),

@@ -5,6 +5,7 @@
  *   node scripts/audit.mjs [--deep] [--only id1,id2] [--all] [--boot 12] [--max 40]
  *                          [--sandbox /tmp/narc-audit-sandbox] [--out ./audit-results]
  *                          [--tools-dir /tmp/narc-audit-tools]
+ *                          [--env KEY=VALUE ...] [--title-suffix "· telemetry disabled"]
  *
  * npm-distributed targets are installed once into --tools-dir (outside narcx)
  * and their bin is executed directly, so npx's own registry lookups and
@@ -113,6 +114,17 @@ const ALL = args.includes("--all");
 // sudo tickets are per-tty, so --deep must run narcx on the terminal where `sudo -v` was typed,
 // not inside a fresh pty. Interactive deep runs therefore inherit this process's stdio.
 const INTERACTIVE = DEEP && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+// Variant runs: --env KEY=VALUE (repeatable) is added to the target's environment,
+// --title-suffix is appended to the scorecard headline, e.g. "· telemetry disabled".
+const EXTRA_ENV = {};
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--env" && args[i + 1]) {
+    const eq = args[i + 1].indexOf("=");
+    if (eq > 0) EXTRA_ENV[args[i + 1].slice(0, eq)] = args[i + 1].slice(eq + 1);
+    i++;
+  }
+}
+const TITLE_SUFFIX = flag("--title-suffix", null) ? String(flag("--title-suffix")) : "";
 
 fs.mkdirSync(OUT, { recursive: true });
 if (!fs.existsSync(NARC)) {
@@ -253,6 +265,7 @@ function cleanEnv() {
   }
   env.PATH = `${path.join(SANDBOX, ".narc-bin")}:${env.PATH || ""}`;
   env.BROWSER = "none";
+  Object.assign(env, EXTRA_ENV);
   return env;
 }
 
@@ -294,7 +307,8 @@ async function runOnce({ id, command, boot, maxWait, deep, attempt, title }) {
     }
   }
 
-  const narcArgs = [NARC, "--card", pngPath, "--json", jsonPath, ...(title ? ["--title", title] : []), ...(deep ? ["--deep"] : []), "--", ...command];
+  const envNote = Object.keys(EXTRA_ENV).length ? Object.entries(EXTRA_ENV).map(([k, v]) => `${k}=${v}`).join(" ") + " · no TLS interception · zero auditor network calls" : null;
+  const narcArgs = [NARC, "--card", pngPath, "--json", jsonPath, ...(title ? ["--title", title] : []), ...(envNote ? ["--footer", envNote] : []), ...(deep ? ["--deep"] : []), "--", ...command];
   const usePty = !(deep && INTERACTIVE);
   log(`${id}: ${command.join(" ")}  (boot ${boot}s, max ${maxWait}s${deep ? ", --deep" : ""}${usePty ? "" : ", on this terminal"})`);
 
@@ -427,6 +441,7 @@ async function main() {
   manifest.scrubbedEnv = scrubbedKeys;
   manifest.browserShim = true;
   manifest.sudoCached = sudoOk;
+  if (Object.keys(EXTRA_ENV).length) manifest.extraEnv = { ...EXTRA_ENV };
   manifest.sandboxIsGitRepo = fs.existsSync(path.join(SANDBOX, ".git"));
 
   if (DEEP && !INTERACTIVE) log("warning: --deep without a terminal — sudo tickets are per-tty, so narcx will skip fs_usage unless sudo is passwordless");
@@ -486,7 +501,8 @@ async function main() {
     const deep = DEEP && isNative;
     entry.mode = deep ? "--deep" : "standard";
     entry.needsDeepTrace = isNative && !deep;
-    const title = `${t.name} ${entry.version}`;
+    const title = `${t.name} ${entry.version}${TITLE_SUFFIX ? " " + TITLE_SUFFIX : ""}`;
+    if (Object.keys(EXTRA_ENV).length) entry.extraEnv = { ...EXTRA_ENV };
 
     const boot = BOOT_OVERRIDE ?? t.boot;
     if (t.preRun) entry.preRunStopped = t.preRun();

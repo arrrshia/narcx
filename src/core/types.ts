@@ -149,6 +149,8 @@ export interface AuditReport {
   narcVersion: string;
   /** Display name for the scorecard (e.g. "Claude Code 2.1.323"); defaults to the command's basename. */
   title: string;
+  /** Left footer text on the card; defaults to the out-of-the-box-defaults line. Set it for variant runs. */
+  footer?: string;
   platform: string;
   command: string[];
   /** Short human-friendly rendering of `command` for the scorecard. */

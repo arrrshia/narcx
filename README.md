@@ -56,6 +56,9 @@ narc [options] -- <command> [args...]
   --deep            Kernel-level tracing: fs_usage on macOS (asks for sudo), strace -f on Linux
   --demo            Run the built-in mock shady-ai-tool
   --render <json>   Re-render the scorecard (terminal + --card PNG) from a saved --json report
+  --regrade <json>  Rebuild a saved report's summaries and grade from its events under the current rules
+  --title <text>    Headline for the card, e.g. "Claude Code 2.1.323"
+  --footer <text>   Left footer line on the card, for variant runs (e.g. "T3CODE_TELEMETRY_ENABLED=false · …")
   -v, --verbose     Also show LLM API traffic, other dotfile reads and repeat requests live
   -q, --quiet       No live alerts, only the exit scorecard
   --no-lsof         Disable the lsof socket poller
@@ -107,6 +110,8 @@ Reads inside the tool's **own namespace** are listed with an `OWN CONFIG` label 
 **Grade**: start at 100, then −25 per telemetry host, −30 per sensitive file read outside the tool's own namespace, −10 per unknown host. `A+` 100 · `A` 90+ · `B` 80+ · `C` 65+ · `D` 50+ · `F` below 50.
 
 ## Honest file-read coverage
+
+Files are attributed to the process that opened them, using the kernel accounting name and, for interpreters, the script they run (`node npm-cli.js` is `npm`). A helper reading its own namespace (`git` → `~/.gitconfig`, a spawned `codex` → `~/.codex/**`) is own config; the audited tool reading another tool's files is third-party. Opens that fail (the path does not exist) are listed as *probed*, never graded, whether the hook or `fs_usage` saw them.
 
 The preload hook only sees Node processes. If the audited tool is a native (Bun/Rust) binary and `--deep` is off, narc reports **file reads not traced** rather than a clean sheet, the `3RD-PARTY SECRETS` metric shows `—`, and the JSON carries `fileTracing: { mode, coverage, untraced }`. A Node wrapper around a native binary (Codex) is reported as *partial* with the unhooked executable named.
 
