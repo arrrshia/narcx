@@ -3,8 +3,11 @@ import { classifyRequest, isIpAddress, isLoopback, normalizeHost } from "./class
 import { computeScore } from "./grade.js";
 import { SensitiveMatcher, ownNamespaces } from "./watchlist.js";
 import type {
+  AttributionKind,
   AuditEvent,
+  ChildActivity,
   DnsEvent,
+  ProcessAttribution,
   EventSource,
   FileEvent,
   FileSummary,
@@ -42,6 +45,8 @@ interface HostRecord {
   firstSeen: number;
   perSource: Map<EventSource, SourceStats>;
   pids: Set<number>;
+  /** Attributions handed in with events (regrade of a saved report). */
+  explicit: ProcessAttribution[];
 }
 
 interface FileRecord {
@@ -54,9 +59,10 @@ interface FileRecord {
   exists: boolean;
   /** Accounting names of processes that touched it (from layers that know them). */
   procs: Set<string>;
+  explicit: ProcessAttribution[];
 }
 
-export type Alert = { launcher: boolean } & (
+export type Alert = { launcher: boolean; attribution?: ProcessAttribution } & (
   | { level: "high"; kind: "file"; event: FileEvent; watch: WatchEntry; display: string }
   | { level: "high"; kind: "net"; event: NetEvent }
   | { level: "warn"; kind: "net"; event: NetEvent }
@@ -69,6 +75,10 @@ export interface CollectorOptions {
   ownNamespaces: Set<string>;
   /** Loopback ports owned by narc itself (proxy, IPC). Connections to them are ignored. */
   ignoreLocalPorts?: Iterable<number>;
+  /** Hosts from the user's own OTEL_EXPORTER_OTLP_* env: classified USER_OTLP, never penalised. */
+  userOtlpHosts?: Iterable<string>;
+  /** Fold external child processes' activity into the grade (default: excluded). */
+  includeChildren?: boolean;
 }
 
 export class Collector extends EventEmitter {
@@ -82,7 +92,11 @@ export class Collector extends EventEmitter {
   private ignoreLocalPorts: Set<number>;
   private launcher: { pid: number; name: string } | null = null;
   private resolveProc: ((pid: number) => string | undefined) | null = null;
+  private attributor: ((pid: number) => ProcessAttribution) | null = null;
+  private nameAttributor: ((name: string) => ProcessAttribution | null) | null = null;
   private ownCache = new Map<string, Set<string>>();
+  private userOtlp: Set<string>;
+  readonly includeChildren: boolean;
   private seq = 0;
 
   constructor(opts: CollectorOptions) {
@@ -90,6 +104,51 @@ export class Collector extends EventEmitter {
     this.matcher = opts.matcher;
     this.ownNamespaces = opts.ownNamespaces;
     this.ignoreLocalPorts = new Set(opts.ignoreLocalPorts ?? []);
+    this.userOtlp = new Set([...(opts.userOtlpHosts ?? [])].map(normalizeHost));
+    this.includeChildren = opts.includeChildren ?? false;
+  }
+
+  /** Per-pid classification (target vs external child), consulted at summary time. */
+  setAttributor(fn: (pid: number) => ProcessAttribution): void {
+    this.attributor = fn;
+  }
+
+  /** Classification by accounting name, for layers that know no pid (fs_usage). */
+  setNameAttributor(fn: (name: string) => ProcessAttribution | null): void {
+    this.nameAttributor = fn;
+  }
+
+  /** The proxy learns a connection's pid a little after the request was logged. */
+  setNetPid(id: string, pid: number): void {
+    const ev = this.netById.get(id);
+    if (!ev || ev.pid === pid) return;
+    ev.pid = pid;
+    this.hosts.get(ev.host)?.pids.add(pid);
+  }
+
+  attributionOfPid(pid: number | undefined): ProcessAttribution | undefined {
+    return pid !== undefined && this.attributor ? this.attributor(pid) : undefined;
+  }
+
+  attributionOfName(name: string): ProcessAttribution | null {
+    return this.nameAttributor ? this.nameAttributor(name) : null;
+  }
+
+  /** Combine every process that touched a record into one verdict: target wins over child. */
+  private resolveAttribution(pids: Iterable<number>, names: Iterable<string>, explicit: ProcessAttribution[]): { attribution: AttributionKind; via: string; processNames: string[] } {
+    const atts: ProcessAttribution[] = [...explicit];
+    for (const pid of pids) {
+      const a = this.attributionOfPid(pid);
+      if (a) atts.push(a);
+    }
+    for (const n of names) {
+      const a = this.attributionOfName(n);
+      if (a) atts.push(a);
+    }
+    const processNames = [...new Set(atts.map((a) => a.processName).filter(Boolean))];
+    if (!atts.length) return { attribution: "target", via: "", processNames: [...new Set(names)] };
+    if (atts.some((a) => a.attribution === "target")) return { attribution: "target", via: "", processNames };
+    return { attribution: "child", via: [...new Set(atts.map((a) => a.via).filter(Boolean))].join("+"), processNames };
   }
 
   ignorePort(port: number): void {
@@ -148,6 +207,7 @@ export class Collector extends EventEmitter {
     id?: string;
     exists?: boolean;
     proc?: string | string[];
+    attribution?: ProcessAttribution;
   }): FileEvent | null {
     const norm = this.matcher.normalize(input.path);
     const watch = this.matcher.match(norm);
@@ -165,15 +225,19 @@ export class Collector extends EventEmitter {
       sensitive: watch ? watch.id : null,
       exists: input.exists,
       proc: Array.isArray(input.proc) ? input.proc[0] : input.proc,
+      processName: input.attribution?.processName,
+      attribution: input.attribution?.attribution,
+      via: input.attribution?.via,
     };
     this.events.push(ev);
 
     let rec = this.files.get(norm);
     const first = !rec;
     if (!rec) {
-      rec = { path: norm, ops: new Map(), sources: new Set(), pids: new Set(), watch, exists: false, procs: new Set() };
+      rec = { path: norm, ops: new Map(), sources: new Set(), pids: new Set(), watch, exists: false, procs: new Set(), explicit: [] };
       this.files.set(norm, rec);
     }
+    if (input.attribution) rec.explicit.push(input.attribution);
     rec.ops.set(ev.op, (rec.ops.get(ev.op) ?? 0) + 1);
     rec.sources.add(ev.source);
     if (ev.pid !== undefined) rec.pids.add(ev.pid);
@@ -185,11 +249,12 @@ export class Collector extends EventEmitter {
     if (first) {
       const display = this.matcher.display(norm);
       const launcher = this.isLauncherPid(ev.pid);
+      const attribution = input.attribution ?? this.attributionOfPid(ev.pid) ?? (ev.proc ? this.attributionOfName(ev.proc) ?? undefined : undefined);
       if (watch) {
-        const alert: Alert = { level: "high", kind: "file", event: ev, watch, display, launcher };
+        const alert: Alert = { level: "high", kind: "file", event: ev, watch, display, launcher, attribution };
         this.emit("alert", alert);
       } else {
-        const alert: Alert = { level: "info", kind: "file", event: ev, display, launcher };
+        const alert: Alert = { level: "info", kind: "file", event: ev, display, launcher, attribution };
         this.emit("alert", alert);
       }
     }
@@ -235,6 +300,7 @@ export class Collector extends EventEmitter {
     bytesIn?: number;
     ts?: number;
     id?: string;
+    attribution?: ProcessAttribution;
   }): NetEvent | null {
     let host = normalizeHost(input.host);
     if (!host) return null;
@@ -243,7 +309,7 @@ export class Collector extends EventEmitter {
       const mapped = this.ipToHost.get(host);
       if (mapped) host = mapped;
     }
-    const category = classifyRequest(host, input.path);
+    const category: HostCategory = this.userOtlp.has(host) ? "USER_OTLP" : classifyRequest(host, input.path);
     const ev: NetEvent = {
       kind: "net",
       id: input.id ?? this.nextId("n"),
@@ -259,6 +325,9 @@ export class Collector extends EventEmitter {
       bytesOut: input.bytesOut ?? 0,
       bytesIn: input.bytesIn ?? 0,
       category,
+      processName: input.attribution?.processName,
+      attribution: input.attribution?.attribution,
+      via: input.attribution?.via,
     };
     this.events.push(ev);
     this.netById.set(ev.id, ev);
@@ -267,7 +336,7 @@ export class Collector extends EventEmitter {
     const first = !rec;
     let upgraded = false;
     if (!rec) {
-      rec = { host, category, firstSeen: ev.ts, perSource: new Map(), pids: new Set() };
+      rec = { host, category, firstSeen: ev.ts, perSource: new Map(), pids: new Set(), explicit: [] };
       this.hosts.set(host, rec);
     } else if (rec.category !== "TELEMETRY" && category === "TELEMETRY") {
       // A path-aware layer just showed this generic host is a telemetry endpoint.
@@ -288,6 +357,7 @@ export class Collector extends EventEmitter {
       rec.perSource.set(ev.source, stats);
     }
     if (ev.pid !== undefined) rec.pids.add(ev.pid);
+    if (input.attribution) rec.explicit.push(input.attribution);
     stats.requests += 1;
     stats.bytesOut += ev.bytesOut;
     stats.bytesIn += ev.bytesIn;
@@ -298,7 +368,7 @@ export class Collector extends EventEmitter {
 
     if (first || upgraded) {
       const level = category === "TELEMETRY" ? "high" : category === "UNKNOWN" ? "warn" : "info";
-      const alert = { level, kind: "net", event: ev, launcher: this.isLauncherPid(ev.pid) } as Alert;
+      const alert = { level, kind: "net", event: ev, launcher: this.isLauncherPid(ev.pid), attribution: input.attribution ?? this.attributionOfPid(ev.pid) } as Alert;
       this.emit("alert", alert);
     } else if (ev.source === "preload" || ev.source === "proxy") {
       // Subsequent requests to an already-known risky host: emit a quiet update
@@ -344,6 +414,7 @@ export class Collector extends EventEmitter {
       const id = rec.watch.id;
       own = [...procs].every((p) => this.ownOf(p).has(id));
     }
+    const att = this.resolveAttribution(rec.pids, rec.procs, rec.explicit);
     return {
       path: rec.path,
       ops,
@@ -353,8 +424,11 @@ export class Collector extends EventEmitter {
       ownNamespace: own,
       launcher: this.launcherOnly(rec.pids),
       exists: rec.exists,
-      procs: [...procs],
+      procs: [...new Set([...procs, ...att.processNames])],
       graded: rec.watch ? rec.watch.graded !== false : false,
+      attribution: att.attribution,
+      via: att.via,
+      processName: att.processNames[0] ?? [...procs][0] ?? "",
     };
   }
 
@@ -450,22 +524,50 @@ export class Collector extends EventEmitter {
         firstSeen: rec.firstSeen,
         launcher: this.launcherOnly(rec.pids),
         suppressed: this.isSuppressedIp(rec, named),
+        ...this.resolveAttribution(rec.pids, [], rec.explicit),
+        pids: [...rec.pids],
       });
     }
-    const order: Record<HostCategory, number> = { TELEMETRY: 0, UNKNOWN: 1, LLM_API: 2, AUTH: 3 };
+    const order: Record<HostCategory, number> = { TELEMETRY: 0, UNKNOWN: 1, USER_OTLP: 2, LLM_API: 3, AUTH: 4 };
     return out.sort(
       (a, b) => order[a.category] - order[b.category] || b.requests - a.requests || a.host.localeCompare(b.host),
     );
   }
 
+  /** Activity that counts toward the grade: the target's own, plus children only with --include-children. */
+  private graded<T extends { attribution: AttributionKind }>(items: T[]): T[] {
+    return this.includeChildren ? items : items.filter((i) => i.attribution !== "child");
+  }
+
   score(): ScoreResult {
-    const hosts = this.hostSummaries();
+    const hosts = this.graded(this.hostSummaries());
     return computeScore({
       telemetryHosts: hosts.filter((h) => h.category === "TELEMETRY" && !h.launcher).map((h) => h.host),
       unknownHosts: hosts.filter((h) => h.category === "UNKNOWN" && !h.launcher).map((h) => h.host),
-      sensitiveFiles: this.sensitiveFiles()
+      sensitiveFiles: this.graded(this.sensitiveFiles())
         .filter((f) => !f.ownNamespace && !f.launcher && f.graded)
         .map((f) => this.matcher.display(f.path)),
     });
+  }
+
+  /** What external child CLIs did, grouped by the child binary (`via`). */
+  childActivity(): Record<string, ChildActivity> {
+    const out: Record<string, ChildActivity> = {};
+    const get = (via: string): ChildActivity =>
+      (out[via] ??= { processName: via, telemetryHosts: [], otherHosts: [], llmHosts: [], authHosts: [], filesAccessed: [], bytesOut: 0 });
+    for (const h of this.hostSummaries()) {
+      if (h.attribution !== "child") continue;
+      const c = get(h.via || h.processNames[0] || "child");
+      if (h.category === "TELEMETRY") c.telemetryHosts.push(h.host);
+      else if (h.category === "LLM_API") c.llmHosts.push(h.host);
+      else if (h.category === "AUTH") c.authHosts.push(h.host);
+      else c.otherHosts.push(h.host);
+      c.bytesOut += h.bytesOut;
+    }
+    for (const f of this.sensitiveFiles()) {
+      if (f.attribution !== "child") continue;
+      get(f.via || f.processName || "child").filesAccessed.push(this.matcher.display(f.path));
+    }
+    return out;
   }
 }

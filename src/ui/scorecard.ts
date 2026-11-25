@@ -28,9 +28,10 @@ const CAT_PAINT: Record<HostCategory, (s: string) => string> = {
   UNKNOWN: pc.yellow,
   LLM_API: pc.green,
   AUTH: pc.cyan,
+  USER_OTLP: pc.cyan,
 };
-const CAT_DOT: Record<HostCategory, string> = { TELEMETRY: "●", UNKNOWN: "▲", LLM_API: "✓", AUTH: "✓" };
-const CAT_TITLE: Record<HostCategory, string> = { TELEMETRY: "TELEMETRY", UNKNOWN: "OTHER", LLM_API: "LLM API", AUTH: "AUTH" };
+const CAT_DOT: Record<HostCategory, string> = { TELEMETRY: "●", UNKNOWN: "▲", LLM_API: "✓", AUTH: "✓", USER_OTLP: "◆" };
+const CAT_TITLE: Record<HostCategory, string> = { TELEMETRY: "TELEMETRY", UNKNOWN: "OTHER", LLM_API: "LLM API", AUTH: "AUTH", USER_OTLP: "USER OTLP" };
 
 export interface ScorecardOptions {
   width?: number;
@@ -76,8 +77,9 @@ export function renderScorecard(report: AuditReport, opts: ScorecardOptions): st
   for (let i = 0; i < 3; i++) row(padEndAnsi(left[i] ?? "", leftW) + "  " + badge[i]);
   blank();
 
-  // sensitive files
-  const sens = report.sensitiveFiles;
+  // sensitive files (target only unless children are folded into the grade)
+  const isGraded = (x: { attribution?: string }) => report.includeChildren || x.attribution !== "child";
+  const sens = report.sensitiveFiles.filter(isGraded);
   const tracing = report.fileTracing;
   section(`SENSITIVE FILES TOUCHED (${sens.length})`);
   if (tracing.coverage === "none") {
@@ -115,13 +117,13 @@ export function renderScorecard(report: AuditReport, opts: ScorecardOptions): st
   if (report.leftoverProcesses?.length) row(pc.yellow(`⚠ left running after exit, stopped by narc: ${report.leftoverProcesses.join(", ")}`));
   blank();
 
-  // outbound
-  const hosts = report.hosts;
+  // outbound (target only unless children are folded into the grade)
+  const hosts = report.hosts.filter(isGraded);
   section(`OUTBOUND (${hosts.length} host${hosts.length === 1 ? "" : "s"})`);
   if (!hosts.length) {
     row(pc.green("✓ no network activity observed"));
   } else {
-    for (const cat of ["TELEMETRY", "UNKNOWN", "LLM_API", "AUTH"] as HostCategory[]) {
+    for (const cat of ["TELEMETRY", "UNKNOWN", "USER_OTLP", "LLM_API", "AUTH"] as HostCategory[]) {
       const group = hosts.filter((h) => h.category === cat);
       if (!group.length) continue;
       row(CAT_PAINT[cat](pc.bold(CAT_TITLE[cat])) + pc.dim(` (${group.length})`));
@@ -133,6 +135,24 @@ export function renderScorecard(report: AuditReport, opts: ScorecardOptions): st
     row(pc.dim(`  raw IPs seen only by lsof, likely the hosts above (not graded): ${report.suppressedHosts.map((h) => h.host).join(", ")}`));
   }
   blank();
+
+  // spawned external CLIs: fully transparent, excluded from the grade
+  const children = Object.values(report.childActivity ?? {});
+  if (children.length && !report.includeChildren) {
+    section("SPAWNED CHILD PROCESSES (excluded from grade)");
+    const byHost = new Map(report.hosts.map((h) => [h.host, h]));
+    for (const c of children) {
+      const hostBits = [...c.telemetryHosts.map((h) => pc.red(h)), ...c.otherHosts.map((h) => pc.yellow(h)), ...c.llmHosts.map((h) => pc.green(h)), ...c.authHosts.map((h) => pc.cyan(h))].map((painted) => {
+        const plain = painted.replace(/\u001b\[[0-9;]*m/g, "");
+        const bytes = byHost.get(plain)?.bytesOut ?? 0;
+        return bytes ? `${painted} ${pc.dim(`(${fmtBytes(bytes)})`)}` : painted;
+      });
+      const files = c.filesAccessed.length ? pc.dim(` · ${c.filesAccessed.length} file${c.filesAccessed.length === 1 ? "" : "s"}`) : "";
+      row(pc.dim("via ") + pc.bold(c.processName) + pc.dim(" -> ") + (hostBits.length ? hostBits.join(pc.dim(", ")) : pc.dim("no network")) + files);
+      if (c.filesAccessed.length) row(pc.dim(`     ${fit(c.filesAccessed.join(", "), inner - 6)}`));
+    }
+    blank();
+  }
 
   // deductions
   if (score.deductions.length) {

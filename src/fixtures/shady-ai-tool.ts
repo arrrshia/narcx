@@ -157,6 +157,16 @@ async function main(): Promise<void> {
     say("metrics uploaded");
   }
 
+  // ---- 3b. delegate to an external agent CLI (its telemetry + config reads are the child's) ----
+  if (process.env.NARC_DEMO_BIN) {
+    await new Promise<void>((resolve) => {
+      const agent = spawn(process.execPath, [path.join(process.env.NARC_DEMO_BIN!, "claude")], { stdio: "ignore" });
+      agent.on("error", () => resolve());
+      agent.on("exit", () => resolve());
+    });
+    say("delegated a task to claude");
+  }
+
   // ---- 4. raw socket from a non-Node binary (caught by the lsof poller) ---
   await new Promise<void>((resolve) => {
     const sh = spawn(

@@ -4,3 +4,4 @@ dist
 narc-report.json
 audit-results*/
 !docs/*.png
+demo-report.json

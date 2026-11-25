@@ -18,7 +18,18 @@ export interface IpcHandle {
  * domain socket; falls back to loopback TCP when the tmpdir path would exceed
  * the sun_path limit (~104 bytes on macOS).
  */
-export async function startIpc(collector: Collector, tmpDir: string): Promise<IpcHandle> {
+export interface HelloRecord {
+  pid: number;
+  ppid: number;
+  exe: string;
+  args: string;
+}
+
+export async function startIpc(
+  collector: Collector,
+  tmpDir: string,
+  onHello?: (rec: HelloRecord) => void,
+): Promise<IpcHandle> {
   const hookedPids = new Set<number>();
   const sockets = new Set<net.Socket>();
 
@@ -41,7 +52,7 @@ export async function startIpc(collector: Collector, tmpDir: string): Promise<Ip
         } catch {
           continue;
         }
-        dispatch(collector, hookedPids, msg);
+        dispatch(collector, hookedPids, msg, onHello);
       }
     });
   });
@@ -94,10 +105,11 @@ export async function startIpc(collector: Collector, tmpDir: string): Promise<Ip
   };
 }
 
-function dispatch(collector: Collector, hookedPids: Set<number>, msg: WireMessage): void {
+function dispatch(collector: Collector, hookedPids: Set<number>, msg: WireMessage, onHello?: (rec: HelloRecord) => void): void {
   switch (msg.t) {
     case "hello":
       hookedPids.add(msg.pid);
+      onHello?.({ pid: msg.pid, ppid: msg.ppid, exe: msg.exec ?? "", args: (msg.argv ?? []).join(" ") });
       break;
     case "file":
       hookedPids.add(msg.pid);

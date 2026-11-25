@@ -35,7 +35,7 @@ const REAL_HOME = (() => {
 const manifest = JSON.parse(fs.readFileSync(path.join(OUT, "manifest.json"), "utf8"));
 const FONT_DIR = path.join(ROOT, "assets", "fonts");
 const FONT_FILES = fs.existsSync(FONT_DIR) ? fs.readdirSync(FONT_DIR).filter((f) => /\.(ttf|otf)$/i.test(f)).map((f) => path.join(FONT_DIR, f)) : [];
-const CAT = { TELEMETRY: "telemetry", UNKNOWN: "other", LLM_API: "LLM", AUTH: "auth" };
+const CAT = { TELEMETRY: "telemetry", UNKNOWN: "other", LLM_API: "LLM", AUTH: "auth", USER_OTLP: "user OTLP" };
 const ORDER = ["claude-code", "codex-cli", "t3code", "gemini-cli", "opencode", "context7-mcp"];
 
 const tilde = (p) => {
@@ -76,6 +76,7 @@ function hostLabel(h) {
 
 function filesCell(report) {
   if (report.fileTracing && report.fileTracing.coverage === "none") return "_not traced (native binary; run `--deep`)_";
+  report = { ...report, sensitiveFiles: (report.sensitiveFiles ?? []).filter((f) => report.includeChildren || f.attribution !== "child") };
   const graded = (f) => f.graded !== false;
   const list = (arr, max = 8) => arr.slice(0, max).map((f) => `\`${tilde(f.path)}\``).join(", ") + (arr.length > max ? ` _+${arr.length - max} more_` : "");
   const viaLauncher = report.sensitiveFiles.filter((f) => f.launcher && graded(f));
@@ -119,8 +120,13 @@ for (const { id, t, report } of rows) {
     lines.push(`| ${md(name)} | ${md(t.runtime ?? "")} | — | — | — | — | ${t.skipped ? `_skipped: ${md(t.skipped)}_` : "_no report_"} |`);
     continue;
   }
-  const tel = report.hosts.filter((h) => h.category === "TELEMETRY");
-  const other = [...report.hosts.filter((h) => h.category !== "TELEMETRY" && !h.launcher), ...report.hosts.filter((h) => h.category !== "TELEMETRY" && h.launcher)];
+  const own = (h) => report.includeChildren || h.attribution !== "child";
+  const tel = report.hosts.filter((h) => h.category === "TELEMETRY" && own(h));
+  const other = [...report.hosts.filter((h) => h.category !== "TELEMETRY" && !h.launcher && own(h)), ...report.hosts.filter((h) => h.category !== "TELEMETRY" && h.launcher && own(h))];
+  const children = report.includeChildren ? [] : Object.values(report.childActivity ?? {});
+  const childCell = children.length
+    ? "<br>_child processes, not graded: " + children.map((c) => `${c.processName} → ${[...c.telemetryHosts.map((h) => h + " (telemetry)"), ...c.otherHosts, ...c.llmHosts, ...c.authHosts].join(", ") || "no network"}${c.filesAccessed.length ? ` + ${c.filesAccessed.length} file${c.filesAccessed.length === 1 ? "" : "s"}` : ""}`).join("; ") + "_"
+    : "";
   const suppressed = report.suppressedHosts ?? [];
   const tracing = report.fileTracing ?? { coverage: t.needsDeepTrace ? "none" : "full", untraced: [] };
   const untraced = (list) => (list.length <= 1 ? list[0] ?? "" : `${list[0]} +${list.length - 1} more`);
@@ -134,7 +140,7 @@ for (const { id, t, report } of rows) {
   const otherCell = other.length ? other.map((h) => hostLabel(h) + (h.category === "UNKNOWN" ? "" : ` — ${CAT[h.category]}`)).join("<br>") : "none";
   const suppCell = suppressed.length ? `<br>_raw IPs seen only by lsof, not graded (dedup): ${suppressed.map((h) => `\`${h.host}\``).join(", ")}_` : "";
   lines.push(
-    `| ${md(name)} | ${md(t.runtime)} | ${mode} | ${tel.length ? tel.map(hostLabel).join("<br>") : "none"} | ${otherCell}${suppCell} | ${filesCell(report)} | **${report.score.grade}** (${report.score.score}/100) |`,
+    `| ${md(name)} | ${md(t.runtime)} | ${mode} | ${tel.length ? tel.map(hostLabel).join("<br>") : "none"} | ${otherCell}${suppCell}${childCell} | ${filesCell(report)} | **${report.score.grade}** (${report.score.score}/100) |`,
   );
 }
 lines.push("");
@@ -149,6 +155,8 @@ lines.push("- Loopback traffic (`127.0.0.1`, `::1`, `localhost`) is never counte
 lines.push("- Host categories: **telemetry** (analytics / error-reporting / metrics vendors, including `ab.chatgpt.com` and `play.googleapis.com`) costs 25 points each; **other** (unclassified) costs 10; **LLM** backends (`api.anthropic.com`, `mcp-proxy.anthropic.com`, `chatgpt.com`, `api.openai.com`, Google Gemini endpoints, …) and **auth** endpoints (`oauth2.googleapis.com`, `accounts.google.com`, …) cost nothing.");
 if (manifest.sandboxIsGitRepo) lines.push("- The sandbox is an empty git repository (`git init`) because `codex exec` refuses to run in an untrusted non-git directory.");
 lines.push("- Files are attributed to the process that opened them. A helper reading its own config (`git` reading `~/.gitconfig`/`~/.netrc`, a spawned `codex` reading `~/.codex/**`) counts as *own config*; the audited tool reading another tool's files is third-party. macOS keychain files are opened by every TLS-speaking process for trust evaluation and are listed as *trust store*, never graded.");
+lines.push("- **Per-process attribution.** Every event is tied to the process that caused it. The audited tool and the processes it ships (wrapper scripts, bundled binaries, its own helpers) are *target*; any external CLI it spawns (`claude`, `codex`, `gemini`, `git`, `gh`, `npm`) is a *child*. Child activity is listed in full but excluded from the grade, so an orchestrator is not penalised for what the agents it launches do. `--include-children` folds it back in.");
+lines.push("- Hosts named in the user's own `OTEL_EXPORTER_OTLP_*` variables are tagged *user OTLP* and never penalised.");
 lines.push("- Coding agents (`claude`, `codex`, `gemini`, `t3`, …) may read `~/.gitconfig` without penalty: git identity is part of their job, as it is for `git` itself. Any other tool reading it is still third-party.");
 lines.push("- The preload hook reports what a tool *tries* to open; a watchlist path that does not exist on this machine is listed as *probed but absent* and never graded.");
 lines.push("- Grading: 100 − 25 per telemetry host − 30 per sensitive file read outside the tool's own namespace − 10 per other host. A native binary audited without `--deep` is reported as *not traced*, never as clean. Reads of a tool's **own** config (`claude` → `~/.claude*`, `codex` → `~/.codex`, `gemini` → `~/.gemini`, `npx` → `~/.npmrc`) are labelled OWN CONFIG and not penalised; one tool reading another tool's credentials is.");
@@ -177,7 +185,12 @@ trap 'kill $KEEPALIVE 2>/dev/null' EXIT
 node scripts/audit.mjs --deep --only ${deepIds.join(",") || "claude-code,codex-cli,t3code"}
 node scripts/mask.mjs
 node scripts/report.mjs
-echo "Deep reports written to ./audit-results (see RESULTS.md)."
+# T3 Code again with its own telemetry switch off, into a separate folder, then compare attribution.
+node scripts/audit.mjs --deep --only t3code --out audit-results-t3-telemetry-off --env T3CODE_TELEMETRY_ENABLED=false --title-suffix "(telemetry disabled)"
+node scripts/mask.mjs --out audit-results-t3-telemetry-off
+node scripts/report.mjs --out audit-results-t3-telemetry-off
+node scripts/compare-t3.mjs audit-results audit-results-t3-telemetry-off
+echo "Deep reports written to ./audit-results and ./audit-results-t3-telemetry-off (see RESULTS.md in each)."
 `;
 fs.writeFileSync(path.join(OUT, "run-deep.sh"), sh, { mode: 0o755 });
 console.log(`wrote ${tilde(path.join(OUT, "run-deep.sh"))} (${deepIds.join(", ") || "no targets currently need deep tracing"})`);

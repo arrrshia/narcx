@@ -29,6 +29,11 @@ export function attachLiveFeed(collector: Collector, opts: LiveOptions): void {
   const write = (s: string) => out.write(s + "\n");
 
   collector.on("alert", (a: Alert) => {
+    if (a.attribution?.attribution === "child") {
+      const what = a.kind === "file" ? a.display : netLine(a.event);
+      write(`${TAG_INFO} ${pc.dim(`child via ${a.attribution.via}`)}  ${what}  ${pc.dim("(not graded)")}`);
+      return;
+    }
     if (a.launcher) {
       if (opts.verbose) {
         const what = a.kind === "file" ? a.display : netLine(a.event);

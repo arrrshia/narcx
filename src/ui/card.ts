@@ -106,7 +106,13 @@ const vr = (x: number, y1: number, y2: number, color = RULE) =>
 
 const monoW = (chars: number, size: number) => chars * size * CH;
 
-const TAG: Record<HostCategory, string> = { TELEMETRY: "TELEMETRY", UNKNOWN: "OTHER", LLM_API: "LLM", AUTH: "AUTH" };
+const TAG: Record<HostCategory, string> = { TELEMETRY: "TELEMETRY", UNKNOWN: "OTHER", LLM_API: "LLM", AUTH: "AUTH", USER_OTLP: "USER OTLP" };
+
+/** `http-intake.logs.us5.datadoghq.com` -> `datadoghq.com` for the compact callout. */
+function vendorDomain(host: string): string {
+  const parts = host.split(".");
+  return parts.length > 2 ? parts.slice(-2).join(".") : host;
+}
 
 function gradeColor(grade: string): string {
   if (grade === "A+" || grade === "A" || grade === "B") return GREEN;
@@ -152,11 +158,13 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
   const topRuleY = 212;
   p.push(hr(M, R, topRuleY, INK, 2));
 
-  // ---- metrics strip ---------------------------------------------------------
-  const hosts = report.hosts.filter((h) => !h.launcher);
+  // ---- metrics strip (target only, unless --include-children) ----------------
+  const isGraded = (x: { attribution?: string }) => report.includeChildren || x.attribution !== "child";
+  const hosts = report.hosts.filter((h) => !h.launcher && isGraded(h));
   const telemetry = hosts.filter((h) => h.category === "TELEMETRY");
   const other = hosts.filter((h) => h.category === "UNKNOWN");
-  const thirdParty = report.sensitiveFiles.filter((f) => !f.ownNamespace && !f.launcher && f.graded !== false);
+  const thirdParty = report.sensitiveFiles.filter((f) => !f.ownNamespace && !f.launcher && f.graded !== false && isGraded(f));
+  const children = report.includeChildren ? [] : Object.values(report.childActivity ?? {}).filter((c) => c.telemetryHosts.length + c.otherHosts.length + c.llmHosts.length + c.authHosts.length + c.filesAccessed.length > 0);
   const untracedFiles = tracing.coverage === "none";
   const metrics: Array<{ label: string; value: string; hot: boolean; note?: string }> = [
     { label: "Telemetry hosts", value: String(telemetry.length), hot: telemetry.length > 0 },
@@ -194,7 +202,7 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
   const lx = M;
   const rx = M + cw + gap;
   const rowH = 36;
-  const maxRows = 6;
+  const maxRows = children.length ? 5 : 6; // leave room for the child-traffic callout
   const firstBaseline = colTop + 34;
 
   const header = (x: number, label: string, right?: string) => {
@@ -211,7 +219,7 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
 
   // left: outbound hosts
   header(lx, "Outbound hosts", "bytes sent");
-  const orderedHosts: HostSummary[] = [...hosts, ...report.hosts.filter((h) => h.launcher)];
+  const orderedHosts: HostSummary[] = [...hosts, ...report.hosts.filter((h) => h.launcher && isGraded(h))];
   if (!orderedHosts.length) {
     p.push(text(lx, firstBaseline, "No network activity observed", { size: 15, family: MONO, fill: MUTED, italic: true }));
   } else {
@@ -242,11 +250,12 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
     p.push(text(rx, firstBaseline, fit(`File reads not traced (native binary${who} — run with --deep)`, Math.floor(cw / (15 * CH))), { size: 15, family: MONO, fill: MUTED, italic: true }));
   } else {
     const graded = (f: FileSummary) => f.graded !== false;
+    const mine = report.sensitiveFiles.filter(isGraded);
     const files: FileSummary[] = [
-      ...report.sensitiveFiles.filter((f) => !f.ownNamespace && !f.launcher && graded(f)),
-      ...report.sensitiveFiles.filter((f) => f.ownNamespace && !f.launcher && graded(f)),
-      ...report.sensitiveFiles.filter((f) => f.launcher && graded(f)),
-      ...report.sensitiveFiles.filter((f) => !graded(f)),
+      ...mine.filter((f) => !f.ownNamespace && !f.launcher && graded(f)),
+      ...mine.filter((f) => f.ownNamespace && !f.launcher && graded(f)),
+      ...mine.filter((f) => f.launcher && graded(f)),
+      ...mine.filter((f) => !graded(f)),
     ];
     const partial = tracing.coverage === "partial";
     const rowsAvail = visibleCount(files.length, partial ? 1 : 0);
@@ -273,6 +282,18 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
       const msg = `Not hooked: ${describeUntraced(tracing.untraced)} · needs --deep`;
       p.push(text(rx, y, fit(msg, Math.floor(cw / (13 * CH))), { size: 13, family: MONO, fill: MUTED, italic: true }));
     }
+  }
+
+  // ---- child-traffic callout: understated, above the footer -------------------
+  if (children.length) {
+    const parts = children.map((c) => {
+      const hostsShort = [...new Set([...c.telemetryHosts, ...c.otherHosts].map(vendorDomain))];
+      const files = c.filesAccessed.length ? ` (+${c.filesAccessed.length} file${c.filesAccessed.length === 1 ? "" : "s"})` : "";
+      return `via ${c.processName}: ${hostsShort.length ? hostsShort.join(", ") : "no telemetry"}${files}`;
+    });
+    const callout = `CHILD TRAFFIC EXCLUDED FROM GRADE · ${parts.join(" · ")}`;
+    p.push(hr(M, R, 561));
+    p.push(text(M, 580, fit(callout, Math.floor((R - M) / (12 * CH))), { size: 12, family: MONO, fill: MUTED, spacing: 0.5 }));
   }
 
   // ---- footer ----------------------------------------------------------------

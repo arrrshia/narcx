@@ -78,7 +78,7 @@ declare const require: NodeRequire;
     dead = true;
   }
 
-  send({ t: "hello", pid, ppid: process.ppid, argv: process.argv });
+  send({ t: "hello", pid, ppid: process.ppid, argv: process.argv, exec: process.execPath });
 
   // ---- helpers --------------------------------------------------------------
 

@@ -109,6 +109,23 @@ for (const name of fs.readdirSync(OUT)) {
     maskProcs(report.sensitiveFiles);
     maskProcs(report.otherDotfiles);
     maskProcs(report.probedFiles);
+    const maskVia = (arr) => {
+      for (const x of arr ?? []) {
+        if (typeof x.via === "string" && x.via && !okName(x.via)) { x.via = "<process>"; touched++; }
+        if (typeof x.processName === "string" && x.processName && !okName(x.processName)) { x.processName = "<process>"; touched++; }
+        if (Array.isArray(x.processNames)) { const n = x.processNames.map((v) => (okName(v) ? v : "<process>")); if (n.join() !== x.processNames.join()) { x.processNames = [...new Set(n)]; touched++; } }
+      }
+    };
+    maskVia(report.sensitiveFiles); maskVia(report.otherDotfiles); maskVia(report.probedFiles); maskVia(report.hosts); maskVia(report.suppressedHosts); maskVia(report.events);
+    if (report.childActivity && typeof report.childActivity === "object") {
+      const next = {};
+      for (const [k, v] of Object.entries(report.childActivity)) {
+        const key = okName(k) ? k : "<process>";
+        if (key !== k) touched++;
+        next[key] = { ...v, processName: okName(v.processName) ? v.processName : "<process>" };
+      }
+      report.childActivity = next;
+    }
     if (Array.isArray(report.leftoverProcesses)) {
       const next = report.leftoverProcesses.map((n) => (okName(n) ? n : "<process>"));
       if (next.join() !== report.leftoverProcesses.join()) {

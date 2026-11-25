@@ -1,4 +1,16 @@
-export type HostCategory = "LLM_API" | "AUTH" | "TELEMETRY" | "UNKNOWN";
+export type HostCategory = "LLM_API" | "AUTH" | "TELEMETRY" | "USER_OTLP" | "UNKNOWN";
+
+/** Who did it: the audited tool (and its own bundled processes) or an external CLI it spawned. */
+export type AttributionKind = "target" | "child";
+
+export interface ProcessAttribution {
+  pid?: number;
+  /** Short name of the process that acted, e.g. "claude", "codex", "git". */
+  processName: string;
+  attribution: AttributionKind;
+  /** For child activity: the external binary directly under the target that this process belongs to. */
+  via: string;
+}
 
 export type EventSource =
   | "proxy"
@@ -24,6 +36,9 @@ export interface FileEvent {
   exists?: boolean;
   /** Accounting name of the process that made the call, when a layer knows it. */
   proc?: string;
+  processName?: string;
+  attribution?: AttributionKind;
+  via?: string;
 }
 
 export interface NetEvent {
@@ -41,6 +56,9 @@ export interface NetEvent {
   bytesOut: number;
   bytesIn: number;
   category: HostCategory;
+  processName?: string;
+  attribution?: AttributionKind;
+  via?: string;
 }
 
 export interface DnsEvent {
@@ -57,7 +75,7 @@ export type AuditEvent = FileEvent | NetEvent | DnsEvent;
 
 /** Wire format sent from the preload hook to the parent over IPC. */
 export type WireMessage =
-  | { t: "hello"; pid: number; ppid: number; argv: string[] }
+  | { t: "hello"; pid: number; ppid: number; argv: string[]; exec: string }
   | { t: "file"; id: string; pid: number; path: string; op: string; exists?: boolean }
   | {
       t: "net";
@@ -115,6 +133,11 @@ export interface FileSummary {
   procs: string[];
   /** False when the watchlist entry is informational only (e.g. keychain trust store). */
   graded: boolean;
+  /** Whether the target itself or an external child process did this. Child activity is not graded. */
+  attribution: AttributionKind;
+  /** Child binary the activity belongs to (e.g. "claude"); empty for target activity. */
+  via: string;
+  processName: string;
 }
 
 export interface HostSummary {
@@ -133,6 +156,10 @@ export interface HostSummary {
   firstSeen: number;
   /** True when only the launcher process (npx, pnpm dlx, …) contacted it. Not graded. */
   launcher: boolean;
+  attribution: AttributionKind;
+  via: string;
+  processNames: string[];
+  pids: number[];
 }
 
 /** How much of the child's file activity narc could actually see. */
@@ -143,6 +170,17 @@ export interface FileTracing {
   coverage: "full" | "partial" | "none";
   /** Names of native executables in the process tree that were not traced. */
   untraced: string[];
+}
+
+export interface ChildActivity {
+  processName: string;
+  telemetryHosts: string[];
+  otherHosts: string[];
+  llmHosts: string[];
+  authHosts: string[];
+  /** Sensitive (watchlist) files the child accessed, including its own config. */
+  filesAccessed: string[];
+  bytesOut: number;
 }
 
 export interface AuditReport {
@@ -174,5 +212,13 @@ export interface AuditReport {
   suppressedHosts: HostSummary[];
   /** Processes the tool left running after it exited (daemons); narc terminates them and lists them here. */
   leftoverProcesses: string[];
+  /** Install root the target was resolved to (processes under it are "target"). */
+  installRoot: string | null;
+  /** True when --include-children folded spawned external CLIs into the grade. */
+  includeChildren: boolean;
+  /** Hostnames taken from the user's own OTEL_EXPORTER_OTLP_* environment; never penalised. */
+  userOtlpHosts: string[];
+  /** Everything external child CLIs did, grouped by child binary. Excluded from the grade unless includeChildren. */
+  childActivity: Record<string, ChildActivity>;
   events: AuditEvent[];
 }

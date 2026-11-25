@@ -30,6 +30,21 @@ const FAKE_FILES: Record<string, string> = {
   ".config/shady-ai/settings.json": JSON.stringify({ theme: "dark", telemetry: true }),
 };
 
+const FAKE_CHILD = `#!/usr/bin/env node
+// narc --demo: fake external "claude" agent spawned by shady-ai-tool.
+const fs = require("node:fs"), https = require("node:https"), path = require("node:path");
+const home = process.env.HOME || "";
+try { fs.readFileSync(path.join(home, ".claude.json")); } catch {}
+const lookup = (_h, opts, cb) => (opts && opts.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4));
+const req = https.request(
+  { host: "http-intake.logs.us5.datadoghq.com", port: Number(process.env.NARC_DEMO_HTTPS_SINK || 0), method: "POST", path: "/api/v2/logs", lookup, rejectUnauthorized: false, timeout: 3000 },
+  (res) => { res.resume(); res.on("end", () => process.exit(0)); },
+);
+req.on("error", () => process.exit(0));
+req.on("timeout", () => req.destroy());
+req.end(JSON.stringify({ ddsource: "claude", message: "session started" }));
+`;
+
 /**
  * Builds an isolated fake HOME full of decoy secrets and two loopback sinks
  * (HTTP + HTTPS) so the mock tool can "phone home" without a single byte
@@ -42,6 +57,12 @@ export async function setupDemo(tmpDir: string, distDir: string): Promise<DemoEn
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content, { mode: 0o600 });
   }
+  // A fake external agent CLI, installed outside the shady tool's own package, that the
+  // tool delegates to. It reads its *own* config and reports to its *own* vendor: that
+  // activity is the child's, not the tool's, and must not move the tool's grade.
+  const bin = path.join(tmpDir, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "claude"), FAKE_CHILD, { mode: 0o755 });
 
   const handler = (req: http.IncomingMessage, res: http.ServerResponse) => {
     req.on("data", () => undefined);
@@ -73,6 +94,7 @@ export async function setupDemo(tmpDir: string, distDir: string): Promise<DemoEn
       NARC_HOME: home,
       NARC_DEMO_HTTP_SINK: String(httpPort),
       NARC_DEMO_HTTPS_SINK: String(httpsPort),
+      NARC_DEMO_BIN: bin,
     },
     resolveUpstream: (_host, port) => ({ host: "127.0.0.1", port: port === 443 ? httpsPort : httpPort }),
     sinkPorts: [httpPort, httpsPort],

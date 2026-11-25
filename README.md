@@ -61,6 +61,7 @@ narc [options] -- <command> [args...]
   --footer <text>   Left footer line on the card, for variant runs (e.g. "T3CODE_TELEMETRY_ENABLED=false · …")
   -v, --verbose     Also show LLM API traffic, other dotfile reads and repeat requests live
   -q, --quiet       No live alerts, only the exit scorecard
+  --include-children  Grade external CLIs the tool spawns as if the tool did it (default: excluded, reported)
   --no-lsof         Disable the lsof socket poller
   --interval <ms>   lsof poll interval (default 150)
 ```
@@ -108,6 +109,16 @@ Reads inside the tool's **own namespace** are listed with an `OWN CONFIG` label 
 - Raw IPs seen only by the lsof poller while the proxy was already naming hosts in the same run are reported as *suppressed* and not graded: they are almost always the same connections seen twice.
 
 **Grade**: start at 100, then −25 per telemetry host, −30 per sensitive file read outside the tool's own namespace, −10 per unknown host. `A+` 100 · `A` 90+ · `B` 80+ · `C` 65+ · `D` 50+ · `F` below 50.
+
+## Target vs. child: who actually did it
+
+Every event is attributed to the process that caused it. The audited tool and whatever it ships (wrapper scripts, bundled native binaries, its own helper processes) are **target**; any external CLI it spawns, such as `claude`, `codex`, `gemini`, `git`, `gh` or `npm`, is a **child**. The install root is derived from the command (`fs.realpathSync` of the executable or entry script, then the nearest package root or a directory named after the tool), and anything running from under it, or carrying the tool's name, stays target.
+
+Child activity is reported in full, in the JSON (`childActivity`, grouped by child binary, plus `attribution`/`processName`/`via` on every host, file and event), in a muted terminal section, and as a one-line callout on the card, but it is **excluded from the grade**: an orchestrator like T3 Code is not penalised because the Claude Code it launched phoned Datadog, and `codex` reading `~/.codex/auth.json` is codex's business. Pass `--include-children` to fold children back into the score.
+
+The proxy attributes each connection to the process that opened it by resolving the client's ephemeral port the moment the connection arrives (`lsof -sTCP:ESTABLISHED`, `/proc/net/tcp` on Linux); the hook reports its pid and executable; `lsof`, `strace` and `fs_usage` carry pids or accounting names. When a pid cannot be resolved the event counts against the target.
+
+Hosts named in your own `OTEL_EXPORTER_OTLP_*` environment are tagged `USER OTLP` and never penalised: exporting your own traces is your choice, not vendor telemetry.
 
 ## Honest file-read coverage
 

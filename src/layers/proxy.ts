@@ -1,6 +1,7 @@
 import * as http from "node:http";
 import * as net from "node:net";
 import type { Collector } from "../core/collector.js";
+import { PortPidResolver } from "./pidresolver.js";
 
 export interface ProxyHandle {
   port: number;
@@ -14,6 +15,8 @@ export interface ProxyOptions {
    * Return null to connect to the real destination.
    */
   resolveUpstream?: (host: string, port: number) => { host: string; port: number } | null;
+  /** Pids of the audited tree, so each connection can be attributed to the process that opened it. */
+  pids?: () => number[];
 }
 
 const HOP_BY_HOP = new Set([
@@ -45,6 +48,17 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
     sockets.add(s);
     s.once("close", () => sockets.delete(s));
   };
+  // Which local process opened each client socket: looked up the moment the
+  // connection arrives, while it is still established, and attached to the
+  // event once known.
+  let resolver: PortPidResolver | null = null;
+  const lookups = new WeakMap<net.Socket, Promise<number | null>>();
+  const attribute = (sock: net.Socket | null | undefined, id: string | undefined) => {
+    if (!sock || !id) return;
+    lookups.get(sock)?.then((pid) => {
+      if (pid) collector.setNetPid(id, pid);
+    });
+  };
 
   const server = http.createServer((req, res) => {
     let target: URL;
@@ -72,6 +86,7 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
       bytesOut,
     });
     const tick = () => ev && collector.updateNet(ev.id, bytesOut, bytesIn);
+    attribute(req.socket, ev?.id);
 
     const up = opts.resolveUpstream?.(host, port) ?? { host, port };
     const headers: Record<string, string | string[]> = {};
@@ -123,6 +138,7 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
       bytesOut,
     });
     const tick = () => ev && collector.updateNet(ev.id, bytesOut, bytesIn);
+    attribute(clientSocket, ev?.id);
 
     const up = opts.resolveUpstream?.(host, port) ?? { host, port };
     const upstream = net.connect(up.port, up.host);
@@ -160,7 +176,10 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
     upstream.on("close", teardown);
   });
 
-  server.on("connection", track);
+  server.on("connection", (sock: net.Socket) => {
+    track(sock);
+    if (resolver && sock.remotePort) lookups.set(sock, resolver.resolve(sock.remotePort));
+  });
   server.on("clientError", (_err, socket) => {
     try {
       socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
@@ -176,6 +195,7 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
   collector.ignorePort(port);
+  if (opts.pids) resolver = new PortPidResolver({ pids: opts.pids, proxyPort: port, attempts: 5 });
 
   return {
     port,

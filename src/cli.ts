@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import pc from "picocolors";
 import pkg from "../package.json";
 import { Collector } from "./core/collector.js";
+import { userOtlpHostsFromEnv } from "./core/classify.js";
+import { ProcessAttributor, type ProcRecord } from "./process-attribution.js";
+import type { HelloRecord } from "./layers/ipc.js";
 import type { AuditReport, FileTracing } from "./core/types.js";
 import { SensitiveMatcher, ownNamespaces } from "./core/watchlist.js";
 import { setupDemo, type DemoEnv } from "./demo.js";
@@ -34,6 +37,7 @@ interface Options {
   footer: string | null;
   quiet: boolean;
   verbose: boolean;
+  includeChildren: boolean;
   lsof: boolean;
   interval: number;
   command: string[];
@@ -58,6 +62,7 @@ ${pc.bold("OPTIONS")}
   --footer <text>   Left footer line on the card, e.g. "T3CODE_TELEMETRY_ENABLED=false · no TLS interception"
   -v, --verbose     Also show LLM API traffic, dotfile reads and repeat requests live
   -q, --quiet       No live alerts, only the exit scorecard
+  --include-children  Grade external CLIs the tool spawns (claude, codex, git, …) as if the tool did it
   --no-lsof         Disable the lsof socket poller
   --interval <ms>   lsof poll interval (default 150)
   -h, --help        Show this help
@@ -90,6 +95,7 @@ function parseArgs(argv: string[]): Options {
     footer: null,
     quiet: false,
     verbose: false,
+    includeChildren: false,
     lsof: true,
     interval: 150,
     command: [],
@@ -126,6 +132,7 @@ function parseArgs(argv: string[]): Options {
     else if (a === "-q" || a === "--quiet") o.quiet = true;
     else if (a === "-v" || a === "--verbose") o.verbose = true;
     else if (a === "--no-lsof") o.lsof = false;
+    else if (a === "--include-children") o.includeChildren = true;
     else if (a === "--interval") o.interval = Math.max(50, Number(argv[++i]) || 150);
     else if (a.startsWith("--interval=")) o.interval = Math.max(50, Number(a.slice(11)) || 150);
     else if (a === "-h" || a === "--help") {
@@ -195,11 +202,28 @@ function loadReport(file: string, opts: Options): { src: string; report: AuditRe
     coverage: report.layers.fs_usage || report.layers.strace ? "full" : report.layers.preload ? "partial" : "none",
     untraced: [],
   };
+  report.childActivity ??= {};
+  report.userOtlpHosts ??= [];
+  report.includeChildren ??= false;
+  report.installRoot ??= null;
   for (const f of [...report.sensitiveFiles, ...report.otherDotfiles, ...report.probedFiles]) {
     f.procs ??= [];
     f.graded ??= true;
+    f.attribution ??= "target";
+    f.via ??= "";
+    f.processName ??= f.procs[0] ?? "";
+  }
+  for (const h of [...report.hosts, ...report.suppressedHosts]) {
+    h.attribution ??= "target";
+    h.via ??= "";
+    h.processNames ??= [];
+    h.pids ??= [];
   }
   return { src, report };
+}
+
+function explicitAttribution(e: { processName?: string; attribution?: "target" | "child"; via?: string }) {
+  return e.attribution ? { processName: e.processName ?? "", attribution: e.attribution, via: e.via ?? "" } : undefined;
 }
 
 /**
@@ -210,7 +234,9 @@ function loadReport(file: string, opts: Options): { src: string; report: AuditRe
 async function regradeFromJson(opts: Options): Promise<void> {
   const { src, report } = loadReport(opts.regrade!, opts);
   const matcher = new SensitiveMatcher(process.env.NARC_HOME || os.homedir());
-  const collector = new Collector({ matcher, ownNamespaces: ownNamespaces(report.command) });
+  const includeChildren = opts.includeChildren || report.includeChildren;
+  const userOtlp = new Set([...report.userOtlpHosts, ...userOtlpHostsFromEnv(process.env)]);
+  const collector = new Collector({ matcher, ownNamespaces: ownNamespaces(report.command), userOtlpHosts: userOtlp, includeChildren });
   if (report.launcher) collector.setLauncher(report.launcher.pid, report.launcher.name);
   // Process attribution for hook events lives in the old summaries (the pid tree is gone).
   const procsByPath = new Map<string, string[]>();
@@ -221,9 +247,23 @@ async function regradeFromJson(opts: Options): Promise<void> {
   for (const e of report.events) {
     if (e.kind === "file") {
       const procs = e.proc ? [e.proc] : procsByPath.get(matcher.normalize(e.path)) ?? [];
-      collector.addFile({ source: e.source, pid: e.pid, path: e.path, op: e.op, exists: e.exists, proc: procs, id: e.id, ts: e.ts });
+      collector.addFile({ source: e.source, pid: e.pid, path: e.path, op: e.op, exists: e.exists, proc: procs, id: e.id, ts: e.ts, attribution: explicitAttribution(e) });
     } else if (e.kind === "net") {
-      collector.addNet({ ...e, id: e.id, ts: e.ts });
+      collector.addNet({
+        source: e.source,
+        pid: e.pid,
+        host: e.host,
+        port: e.port,
+        protocol: e.protocol,
+        method: e.method,
+        path: e.path,
+        url: e.url,
+        bytesOut: e.bytesOut,
+        bytesIn: e.bytesIn,
+        id: e.id,
+        ts: e.ts,
+        attribution: explicitAttribution(e),
+      });
     } else if (e.kind === "dns") {
       collector.addDns({ source: e.source, pid: e.pid, host: e.host, addresses: e.addresses, id: e.id });
     }
@@ -233,6 +273,9 @@ async function regradeFromJson(opts: Options): Promise<void> {
   report.probedFiles = collector.probedFiles();
   report.hosts = collector.hostSummaries();
   report.suppressedHosts = collector.suppressedHosts();
+  report.childActivity = collector.childActivity();
+  report.includeChildren = includeChildren;
+  report.userOtlpHosts = [...userOtlp];
   report.score = collector.score();
   (report as AuditReport & { regradedAt?: string; regradedWith?: string }).regradedAt = new Date().toISOString();
   (report as AuditReport & { regradedWith?: string }).regradedWith = VERSION;
@@ -296,11 +339,26 @@ async function main(): Promise<void> {
   }
 
   const matcher = new SensitiveMatcher(home);
-  const collector = new Collector({ matcher, ownNamespaces: ownNamespaces(command) });
+  const userOtlp = userOtlpHostsFromEnv(process.env);
+  const collector = new Collector({ matcher, ownNamespaces: ownNamespaces(command), userOtlpHosts: userOtlp, includeChildren: opts.includeChildren });
   attachLiveFeed(collector, { quiet: opts.quiet, verbose: opts.verbose });
+  if (userOtlp.length && !opts.quiet) log(`OTEL_EXPORTER_OTLP_* in your environment: ${userOtlp.join(", ")} will be reported as USER OTLP, not penalised`);
+
+  // Process tree + attribution (target vs spawned external CLI). The attributor
+  // needs the child's pid, so hello records arriving before spawn are parked.
+  const tree = new PidTree(0, opts.interval);
+  let attributor: ProcessAttributor | null = null;
+  const helloRecords = new Map<number, HelloRecord>();
+  const onHello = (rec: HelloRecord) => {
+    helloRecords.set(rec.pid, rec);
+    attributor?.register(rec);
+  };
 
   // ---- Layer 1 + 2 plumbing -------------------------------------------------
-  const [ipc, proxy] = await Promise.all([startIpc(collector, tmpDir), startProxy({ collector, resolveUpstream: demo?.resolveUpstream })]);
+  const [ipc, proxy] = await Promise.all([
+    startIpc(collector, tmpDir, onHello),
+    startProxy({ collector, resolveUpstream: demo?.resolveUpstream, pids: () => tree.pids() }),
+  ]);
   cleanups.push(() => ipc.close(), () => proxy.close());
 
   const preloadSrc = path.join(DIST_DIR, "preload.cjs");
@@ -325,7 +383,6 @@ async function main(): Promise<void> {
   }
 
   // ---- Layer 3: OS-level ---------------------------------------------------
-  const tree = new PidTree(0, opts.interval);
   let spawnCommand = command;
   let useStrace = false;
   let fsUsage: FsUsageHandle | null = null;
@@ -393,6 +450,21 @@ async function main(): Promise<void> {
   if (launcherName) collector.setLauncher(child.pid!, launcherName);
   const rootName = path.basename(command[0] ?? "");
   collector.setProcessResolver((pid) => (pid === child.pid ? rootName : tree.nameOf(pid)));
+  const toRec = (pid: number): ProcRecord | undefined => {
+    const p = tree.info(pid);
+    return p ? { pid, ppid: p.ppid, exe: p.comm, args: p.args } : undefined;
+  };
+  attributor = new ProcessAttributor(child.pid!, command, toRec);
+  for (const r of helloRecords.values()) attributor.register(r);
+  const att = attributor;
+  collector.setAttributor((pid) => att.classify(pid));
+  collector.setNameAttributor((name) =>
+    att.classifyName(
+      name,
+      tree.seenProcesses().map((p) => ({ pid: p.pid, ppid: p.ppid, exe: p.comm, args: p.args })),
+    ),
+  );
+  if (opts.verbose) log(`target: ${att.target.identity} · install root: ${att.target.root ?? "(none)"}`);
 
   tree.setRoot(child.pid!);
   tree.start();
@@ -462,8 +534,17 @@ async function main(): Promise<void> {
     command,
   });
 
+  att.clearCache(); // final verdicts come from the complete process tree, not early ps fallbacks
   for (const e of collector.events) {
     if (e.kind === "file" && !e.proc && e.pid !== undefined) e.proc = e.pid === child.pid ? rootName : tree.nameOf(e.pid);
+    if (e.kind === "file" || e.kind === "net") {
+      const a = e.pid !== undefined ? att.classify(e.pid) : e.kind === "file" && e.proc ? collector.attributionOfName(e.proc) : null;
+      if (a) {
+        e.processName = a.processName;
+        e.attribution = a.attribution;
+        e.via = a.via;
+      }
+    }
   }
 
   const report: AuditReport = {
@@ -488,6 +569,10 @@ async function main(): Promise<void> {
     hosts: collector.hostSummaries(),
     suppressedHosts: collector.suppressedHosts(),
     leftoverProcesses: [...new Set(leftoverProcesses)],
+    installRoot: att.target.root,
+    includeChildren: opts.includeChildren,
+    userOtlpHosts: userOtlp,
+    childActivity: collector.childActivity(),
     events: collector.events,
   };
 

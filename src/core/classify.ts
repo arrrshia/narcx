@@ -152,5 +152,33 @@ export const CATEGORY_LABEL: Record<HostCategory, string> = {
   LLM_API: "LLM",
   AUTH: "AUTH",
   TELEMETRY: "TELEMETRY",
+  USER_OTLP: "USER OTLP",
   UNKNOWN: "OTHER",
 };
+
+export const OTEL_ENDPOINT_VARS = [
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+] as const;
+
+/**
+ * Hostnames the user configured in their own OTEL_EXPORTER_OTLP_* variables.
+ * Traffic to them is the user's choice, not vendor telemetry.
+ */
+export function userOtlpHostsFromEnv(env: NodeJS.ProcessEnv): string[] {
+  const out = new Set<string>();
+  for (const k of OTEL_ENDPOINT_VARS) {
+    const v = env[k]?.trim();
+    if (!v) continue;
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? v : "http://" + v;
+    try {
+      const h = normalizeHost(new URL(withScheme).hostname);
+      if (h && !isLoopback(h)) out.add(h);
+    } catch {
+      /* unparsable value: ignore */
+    }
+  }
+  return [...out];
+}

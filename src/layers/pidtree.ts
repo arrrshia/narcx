@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import * as path from "node:path";
+import { processLabel } from "../process-attribution.js";
 
 export interface ProcInfo {
   pid: number;
@@ -10,28 +11,6 @@ export interface ProcInfo {
   ucomm: string;
   /** Full command line (`ps -o args`), used to name interpreter processes by their script. */
   args: string;
-}
-
-const INTERPRETERS = new Set(["node", "nodejs", "bun", "deno", "python", "python3", "python2", "perl", "ruby", "sh", "bash", "zsh", "dash", "fish"]);
-/** Interpreter flags that consume the next token. */
-const FLAGS_WITH_VALUE = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "--max-old-space-size", "-m", "-W"]);
-/** Flags after which the "script" is inline code, so no script name exists. */
-const INLINE_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-c"]);
-
-/** First script path on an interpreter command line, or null for inline code / REPLs. */
-function scriptOf(args: string): string | null {
-  const toks = args.split(/\s+/).filter(Boolean);
-  for (let i = 1; i < toks.length; i++) {
-    const t = toks[i]!;
-    if (INLINE_FLAGS.has(t)) return null;
-    if (FLAGS_WITH_VALUE.has(t)) {
-      i++;
-      continue;
-    }
-    if (t.startsWith("-")) continue;
-    return t;
-  }
-  return null;
 }
 
 /**
@@ -103,15 +82,10 @@ export class PidTree {
   static displayName(p: ProcInfo): string {
     const exe = path.basename(p.comm.split(" ")[0] ?? p.comm);
     const base = !p.ucomm || /^[\d.]+$/.test(p.ucomm) ? exe : p.ucomm;
-    if (INTERPRETERS.has(base) || INTERPRETERS.has(exe)) {
-      const script = p.args ? scriptOf(p.args) : null;
-      if (script) {
-        let n = path.basename(script).replace(/\.(c|m)?js$|\.py$|\.rb$|\.pl$|\.sh$/, "");
-        if (n === "npm-cli") n = "npm";
-        else if (n === "npx-cli") n = "npx";
-        if (n) return n;
-      }
-    }
+    // Interpreters are named by the script they run (`node npm-cli.js` -> `npm`).
+    const label = processLabel({ exe: p.comm, args: p.args });
+    const exeIsInterpreter = /^(node|nodejs|bun|deno|python3?|python2|perl|ruby|sh|bash|zsh|dash|fish)$/.test(exe);
+    if (exeIsInterpreter && label !== exe) return label;
     return base;
   }
 
