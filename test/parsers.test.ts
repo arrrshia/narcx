@@ -93,6 +93,11 @@ describe("fs_usage parsing", () => {
     expect(reconstructPath("junk/private/tmp/x/.env", "/Users/arshia")).toBe("/private/tmp/x/.env");
     expect(reconstructPath("rshia/Library/Application Support/x", "/Users/arshia")).toBe("/Users/arshia/Library/Application Support/x");
     expect(reconstructPath("/Library/Keychains/System.keychain", "/Users/arshia")).toBe("/Library/Keychains/System.keychain");
+    // cut inside "/Users/": the username segment is part of the home prefix, not a directory under it
+    expect(reconstructPath("s/arshia/.local/share/uv/tools/x/y.pyc", "/Users/arshia")).toBe("/Users/arshia/.local/share/uv/tools/x/y.pyc");
+    expect(reconstructPath("arshia/.codex/config.toml", "/Users/arshia")).toBe("/Users/arshia/.codex/config.toml");
+    // cut after the home prefix: unknowable, dropped
+    expect(reconstructPath("ocal/share/x", "/Users/arshia")).toBeNull();
   });
 
   it("accepts AT_FDCWD style negative descriptors in the fd column", () => {

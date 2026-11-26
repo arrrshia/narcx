@@ -450,6 +450,7 @@ async function main() {
   const manifest = fs.existsSync(manifestPath)
     ? JSON.parse(fs.readFileSync(manifestPath, "utf8"))
     : { generatedAt: null, narcVersion, sandbox: SANDBOX, platform: `${process.platform}-${process.arch}`, node: process.version, targets: {} };
+  delete manifest.masked; // mask.mjs flags what it has scrubbed; this file is fresh again
   manifest.generatedAt = new Date().toISOString();
   manifest.narcVersion = narcVersion;
   manifest.scrubbedEnv = scrubbedKeys;

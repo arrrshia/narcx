@@ -75,8 +75,15 @@ export function reconstructPath(tail: string, home: string): string | null {
   // 4) a known root glued to junk ("F=-2/private/tmp/x"), unless the "junk" is a trimmed fragment of the home dir
   const m = ROOTS.exec(t);
   if (m && m.index > 0 && !home.endsWith(t.slice(0, m.index))) return t.slice(m.index);
-  // 5) trimmed somewhere inside the home prefix: "rshia/.aws/credentials"
-  return path.join(home, t.slice(t.indexOf("/") + 1));
+  // 5) trimmed somewhere inside the home prefix ("rshia/.aws/credentials", "s/arshia/.local/x"):
+  //    the tail is a suffix of `${home}/${rest}`, so take the longest suffix of `${home}/` it starts with.
+  //    A cut after the home prefix ("ocal/share/x") cannot be reconstructed, so it is dropped rather than guessed.
+  const hp = home + "/";
+  for (let n = 1; n < hp.length; n++) {
+    const suffix = hp.slice(n);
+    if (t.startsWith(suffix)) return path.join(home, t.slice(suffix.length));
+  }
+  return null;
 }
 
 export function sudoCached(): boolean {

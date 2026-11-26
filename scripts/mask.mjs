@@ -7,8 +7,12 @@
  *
  * Originals are kept once in audit-results/raw/ (gitignored with the rest).
  * Rules:
- *   - <plugin>  codex plugin names under ~/.codex/plugins/cache/<name>/<name>/
+ *   - <plugin>  codex marketplace and plugin names under ~/.codex/plugins/cache/<market>/<plugin>,
+ *               and the same names wherever else they appear as a whole path segment or word
+ *   - <marketplace> git checkouts under ~/.codex/.tmp/marketplaces/<name>
+ *   - <tool>    uv / pipx tool venvs (~/.local/share/uv/tools/<name>), often a personal MCP server
  *   - <uuid>    any UUID (e.g. Claude plugin-sync ids under ~/.claude/plugins/synced/)
+ *   - <hash>    any bare hex id of 32+ digits (plugin trust records, git objects, cache keys)
  *   - ~         the home directory, wherever it appears (JSON paths, pty logs); a doubled
  *               home prefix (fs_usage column artifact) collapses to one
  *   - <process> untraced process names after the first (they may be personal MCP servers)
@@ -30,22 +34,49 @@ const RAW = path.join(OUT, "raw");
 fs.mkdirSync(RAW, { recursive: true });
 
 export const RULES = [
-  [/(\/\.codex\/plugins\/cache\/)[^/]+\/[^/]+\//g, "$1<plugin>/<plugin>/"],
-  [/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<uuid>"],
+  // <marketplace>/<plugin>, with or without anything after; a path ending at the marketplace dir too
+  [/(\/\.codex\/plugins\/cache\/)[^/"\s<]+\/[^/"\s<]+/g, "$1<plugin>/<plugin>"],
+  [/(\/\.codex\/plugins\/cache\/)[^/"\s<]+/g, "$1<plugin>"],
+  // everything inside an installed plugin is that plugin's own file tree, not the audited tool's business
+  [/(\/\.codex\/plugins\/cache\/<plugin>\/<plugin>\/)[^"\s]+/g, "$1…"],
+  [/(\/\.codex\/(?:\.tmp\/)?marketplaces\/)(?!\.)[^/"\s<]+/g, "$1<marketplace>"],
+  [/(\/\.local\/share\/uv\/tools\/)[^/"\s<]+/g, "$1<tool>"],
+  [/(\/\.local\/pipx\/venvs\/)[^/"\s<]+/g, "$1<tool>"],
+  [/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[0-9a-f]{6,})*/gi, "<uuid>"],
+  // any bare hex id of 32+ digits: plugin trust records, git objects, npm cache keys, server-info caches
+  [/\b[0-9a-f]{32,}\b/g, "<hash>"],
 ];
+// Literal plugin / marketplace / tool names. Applied only to strings that are paths or log
+// lines (they contain "/" or whitespace), never to a bare hostname such as gmail.googleapis.com.
+export const LITERAL_RULES = [];
+// Process names that must never be treated as a plugin/tool name to mask (see KNOWN below).
+const NEVER_LITERAL = new Set(["node", "npm", "npx", "git", "gh", "uv", "uvx", "pip", "pipx", "python", "python3", "bun", "deno", "codex", "claude", "gemini", "cursor", "t3", "sh", "bash", "zsh", "curl", "wget", "ssh", "open", "ps", "lsof", "security"]);
 // Literal plugin names, collected from the (raw) reports, so a tool printing
 // "loaded plugin foo" in its own output gets masked too, not just the path form.
-const literals = new Set();
+const literals = new Map(); // name -> placeholder
 for (const dir of [RAW, OUT]) {
   if (!fs.existsSync(dir)) continue;
   for (const name of fs.readdirSync(dir)) {
     if (!name.endsWith(".json") || name === "manifest.json") continue;
     const text = fs.readFileSync(path.join(dir, name), "utf8");
-    for (const m of text.matchAll(/\/\.codex\/plugins\/cache\/([^/"<]+)\//g)) literals.add(m[1]);
+    for (const m of text.matchAll(/\/\.codex\/plugins\/cache\/([^/"<\s]+)(?:\/([^/"<\s]+))?/g)) {
+      literals.set(m[1], "<plugin>");
+      if (m[2]) literals.set(m[2], "<plugin>");
+    }
+    for (const m of text.matchAll(/\/\.codex\/(?:\.tmp\/)?marketplaces\/([^/".<\s][^/"<\s]*)/g)) literals.set(m[1], "<marketplace>");
+    for (const m of text.matchAll(/\/\.local\/(?:share\/uv\/tools|pipx\/venvs)\/([^/"<\s]+)/g)) {
+      literals.set(m[1], "<tool>");
+      literals.set(m[1].replace(/-/g, "_"), "<tool>"); // python module / dist-info spelling
+    }
   }
 }
 const escapeRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-for (const name of literals) RULES.push([new RegExp(escapeRe(name), "g"), "<plugin>"]);
+// A literal is masked as a whole path segment or word, including "name.ext" and "x-name" forms
+// inside a path, and never when it is also a well-known process name.
+for (const [name, placeholder] of literals) {
+  if (name.length < 3 || NEVER_LITERAL.has(name) || name.startsWith("<")) continue;
+  LITERAL_RULES.push([new RegExp("(^|[/\\s\"'_-])" + escapeRe(name) + "(?=$|[/\\s\"'_.-])", "g"), "$1" + placeholder]);
+}
 
 // Home directory (both spellings on macOS) -> "~", so even the raw JSON and
 // pty logs can be shared. `narc --render` understands "~/" paths.
@@ -65,13 +96,32 @@ for (const h of new Set([HOME, REAL_HOME])) {
 }
 RULES.push([/~\/Users\/[^/\s"]+(?=\/|$)/g, "~"]);
 RULES.push([/~\/home\/[^/\s"]+(?=\/|$)/g, "~"]);
+// Safety net for a username that survived as a path segment ("~/<user>/.local/…" from a
+// truncated fs_usage column): it is the home directory, not a folder under it.
+RULES.push([new RegExp("~/" + escapeRe(path.basename(REAL_HOME)) + "(?=/|$)", "g"), "~"]);
+if (path.basename(HOME) !== path.basename(REAL_HOME)) RULES.push([new RegExp("~/" + escapeRe(path.basename(HOME)) + "(?=/|$)", "g"), "~"]);
 
-const mask = (s) => (typeof s === "string" ? RULES.reduce((acc, [re, rep]) => acc.replace(re, rep), s) : s);
+const mask = (s) => {
+  if (typeof s !== "string") return s;
+  let out = RULES.reduce((acc, [re, rep]) => acc.replace(re, rep), s);
+  if (/[/\s]/.test(out)) out = LITERAL_RULES.reduce((acc, [re, rep]) => acc.replace(re, rep), out);
+  return out;
+};
 
+// A report we have masked before carries `masked: true`, so it can never be mistaken for a
+// fresh original; logs have no such flag and fall back to "newer than our copy".
+const isMaskedJson = (file) => {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8")).masked === true;
+  } catch {
+    return false;
+  }
+};
+const newerThan = (a, b) => fs.statSync(a).mtimeMs > fs.statSync(b).mtimeMs + 1000;
 const keepRaw = (file) => {
   const dst = path.join(RAW, path.basename(file));
-  // Copy when missing or when the source is a newer run than the copy we hold.
-  if (!fs.existsSync(dst) || fs.statSync(file).mtimeMs > fs.statSync(dst).mtimeMs + 1000) fs.copyFileSync(file, dst);
+  if (!fs.existsSync(dst)) return fs.copyFileSync(file, dst);
+  if (file.endsWith(".json") ? !isMaskedJson(file) && newerThan(file, dst) : newerThan(file, dst)) fs.copyFileSync(file, dst);
 };
 
 if (FROM_RAW && fs.existsSync(RAW)) {
@@ -81,7 +131,8 @@ if (FROM_RAW && fs.existsSync(RAW)) {
     if (!(name.endsWith(".json") || name.endsWith(".log"))) continue;
     const src = path.join(OUT, name);
     const rawFile = path.join(RAW, name);
-    if (!fs.existsSync(src) || fs.statSync(rawFile).mtimeMs >= fs.statSync(src).mtimeMs - 1000) fs.copyFileSync(rawFile, src);
+    const restore = name.endsWith(".json") ? isMaskedJson(src) : fs.statSync(rawFile).mtimeMs >= fs.statSync(src).mtimeMs - 1000;
+    if (!fs.existsSync(src) || restore) fs.copyFileSync(rawFile, src);
   }
 }
 let changed = 0;
@@ -177,8 +228,9 @@ for (const name of fs.readdirSync(OUT)) {
         touched++;
       }
     }
-    if (touched) {
+    if (touched || report.masked !== true) {
       keepRaw(file);
+      report.masked = true;
       fs.writeFileSync(file, JSON.stringify(report, null, 2));
       changed++;
     }
@@ -211,6 +263,7 @@ if (fs.existsSync(manifestPath)) {
     return v;
   };
   walk(manifest);
+  manifest.masked = true;
   for (const t of Object.values(manifest.targets ?? {})) {
     const u = t?.fileTracing?.untraced;
     if (Array.isArray(u) && u.length > 1) t.fileTracing.untraced = [u[0], ...u.slice(1).map(() => "<process>")];
