@@ -183,7 +183,7 @@ describe("Collector with attribution", () => {
     const c = mk();
     c.setAttributor(attributor);
     const ev = c.addNet({ source: "proxy", host: "http-intake.logs.us5.datadoghq.com", port: 443, protocol: "https", method: "CONNECT" })!;
-    expect(c.hostSummaries()[0]!.attribution).toBe("target"); // unknown pid: counted against the target
+    expect(c.hostSummaries()[0]!.attribution).toBe("unattributed"); // pid not resolved yet: never pinned on the target
     c.setNetPid(ev.id, 2);
     expect(c.hostSummaries()[0]!.attribution).toBe("child");
     expect(c.score().score).toBe(100);

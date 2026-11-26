@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { classifyRequest, isIpAddress, isLoopback, normalizeHost } from "./classify.js";
+import * as fs from "node:fs";
+import { classifyRequest, isIpAddress, isLoopback, knownChildOwner, normalizeHost } from "./classify.js";
 import { computeScore } from "./grade.js";
 import { SensitiveMatcher, ownNamespaces } from "./watchlist.js";
 import type {
@@ -17,6 +18,7 @@ import type {
   Protocol,
   ScoreResult,
   WatchEntry,
+  WatchKind,
 } from "./types.js";
 
 /** Higher = more trustworthy counts for a host. */
@@ -60,6 +62,8 @@ interface FileRecord {
   /** Accounting names of processes that touched it (from layers that know them). */
   procs: Set<string>;
   explicit: ProcessAttribution[];
+  /** True when the path is a directory (listing or probing a directory is never a secret read). */
+  isDir: boolean;
 }
 
 export type Alert = { launcher: boolean; attribution?: ProcessAttribution } & (
@@ -94,6 +98,7 @@ export class Collector extends EventEmitter {
   private resolveProc: ((pid: number) => string | undefined) | null = null;
   private attributor: ((pid: number) => ProcessAttribution) | null = null;
   private nameAttributor: ((name: string) => ProcessAttribution | null) | null = null;
+  private observedChildren: (() => Set<string>) | null = null;
   private ownCache = new Map<string, Set<string>>();
   private userOtlp: Set<string>;
   readonly includeChildren: boolean;
@@ -118,6 +123,11 @@ export class Collector extends EventEmitter {
     this.nameAttributor = fn;
   }
 
+  /** External child CLIs seen in the tree, for attributing short-lived connections whose pid vanished. */
+  setObservedChildren(fn: () => Set<string>): void {
+    this.observedChildren = fn;
+  }
+
   /** The proxy learns a connection's pid a little after the request was logged. */
   setNetPid(id: string, pid: number): void {
     const ev = this.netById.get(id);
@@ -134,8 +144,19 @@ export class Collector extends EventEmitter {
     return this.nameAttributor ? this.nameAttributor(name) : null;
   }
 
-  /** Combine every process that touched a record into one verdict: target wins over child. */
-  private resolveAttribution(pids: Iterable<number>, names: Iterable<string>, explicit: ProcessAttribution[]): { attribution: AttributionKind; via: string; processNames: string[] } {
+  /**
+   * Combine every process that touched a record into one verdict: target wins
+   * over child. A host nobody could be pinned to is handed to a well-known
+   * child CLI that was actually observed in the tree, or left `unattributed`;
+   * a file with no process information counts against the target (file
+   * events always come with a pid or a process name, so this is theoretical).
+   */
+  private resolveAttribution(
+    pids: Iterable<number>,
+    names: Iterable<string>,
+    explicit: ProcessAttribution[],
+    host?: string,
+  ): { attribution: AttributionKind; via: string; processNames: string[] } {
     const atts: ProcessAttribution[] = [...explicit];
     for (const pid of pids) {
       const a = this.attributionOfPid(pid);
@@ -146,9 +167,19 @@ export class Collector extends EventEmitter {
       if (a) atts.push(a);
     }
     const processNames = [...new Set(atts.map((a) => a.processName).filter(Boolean))];
-    if (!atts.length) return { attribution: "target", via: "", processNames: [...new Set(names)] };
+    if (!atts.length) {
+      // Only a run that could attribute at all (process tracking active) may call a host
+      // unattributed; a plain collector or an old report without attribution stays "target".
+      if (host !== undefined && (this.attributor || this.observedChildren)) {
+        const owner = knownChildOwner(host);
+        if (owner && this.observedChildren?.().has(owner)) return { attribution: "child", via: owner, processNames: [owner] };
+        return { attribution: "unattributed", via: "", processNames: [] };
+      }
+      return { attribution: "target", via: "", processNames: [...new Set(names)] };
+    }
     if (atts.some((a) => a.attribution === "target")) return { attribution: "target", via: "", processNames };
-    return { attribution: "child", via: [...new Set(atts.map((a) => a.via).filter(Boolean))].join("+"), processNames };
+    if (atts.every((a) => a.attribution === "unattributed")) return { attribution: "unattributed", via: "", processNames };
+    return { attribution: "child", via: [...new Set(atts.filter((a) => a.attribution === "child").map((a) => a.via).filter(Boolean))].join("+"), processNames };
   }
 
   ignorePort(port: number): void {
@@ -234,7 +265,15 @@ export class Collector extends EventEmitter {
     let rec = this.files.get(norm);
     const first = !rec;
     if (!rec) {
-      rec = { path: norm, ops: new Map(), sources: new Set(), pids: new Set(), watch, exists: false, procs: new Set(), explicit: [] };
+      let isDir = /^(promises\.)?readdir(Sync)?$/.test(input.op);
+      if (!isDir && input.exists !== false) {
+        try {
+          isDir = fs.statSync(norm).isDirectory();
+        } catch {
+          /* unknown: treat as a file */
+        }
+      }
+      rec = { path: norm, ops: new Map(), sources: new Set(), pids: new Set(), watch, exists: false, procs: new Set(), explicit: [], isDir };
       this.files.set(norm, rec);
     }
     if (input.attribution) rec.explicit.push(input.attribution);
@@ -250,7 +289,7 @@ export class Collector extends EventEmitter {
       const display = this.matcher.display(norm);
       const launcher = this.isLauncherPid(ev.pid);
       const attribution = input.attribution ?? this.attributionOfPid(ev.pid) ?? (ev.proc ? this.attributionOfName(ev.proc) ?? undefined : undefined);
-      if (watch) {
+      if (watch && watch.kind === "secret") {
         const alert: Alert = { level: "high", kind: "file", event: ev, watch, display, launcher, attribution };
         this.emit("alert", alert);
       } else {
@@ -407,13 +446,20 @@ export class Collector extends EventEmitter {
         if (n) procs.add(n);
       }
     }
-    // Own namespace: the audited command owns the entry, or every process that touched
-    // the file owns it (codex reading ~/.codex, git reading ~/.gitconfig).
-    let own = rec.watch ? this.ownNamespaces.has(rec.watch.id) : false;
-    if (!own && rec.watch && procs.size) {
-      const id = rec.watch.id;
-      own = [...procs].every((p) => this.ownOf(p).has(id));
+    // Own namespace: the audited command owns the entry (by id, owner namespace or the
+    // config namespace the path lives in), or every process that touched the file does
+    // (codex reading ~/.codex, git reading ~/.gitconfig).
+    const ids = new Set<string>();
+    if (rec.watch) {
+      ids.add(rec.watch.id);
+      if (rec.watch.owner) ids.add(rec.watch.owner);
+      const ns = this.matcher.ownerOf(rec.path);
+      if (ns) ids.add(ns);
     }
+    const ownedBy = (set: Set<string>) => [...ids].some((id) => set.has(id));
+    let own = rec.watch ? ownedBy(this.ownNamespaces) : false;
+    if (!own && rec.watch && procs.size) own = [...procs].every((p) => ownedBy(this.ownOf(p)));
+    const kind: WatchKind = rec.watch ? (rec.isDir && rec.watch.kind === "secret" ? "config" : rec.watch.kind) : "config";
     const att = this.resolveAttribution(rec.pids, rec.procs, rec.explicit);
     return {
       path: rec.path,
@@ -425,7 +471,8 @@ export class Collector extends EventEmitter {
       launcher: this.launcherOnly(rec.pids),
       exists: rec.exists,
       procs: [...new Set([...procs, ...att.processNames])],
-      graded: rec.watch ? rec.watch.graded !== false : false,
+      graded: kind === "secret",
+      kind,
       attribution: att.attribution,
       via: att.via,
       processName: att.processNames[0] ?? [...procs][0] ?? "",
@@ -524,7 +571,7 @@ export class Collector extends EventEmitter {
         firstSeen: rec.firstSeen,
         launcher: this.launcherOnly(rec.pids),
         suppressed: this.isSuppressedIp(rec, named),
-        ...this.resolveAttribution(rec.pids, [], rec.explicit),
+        ...this.resolveAttribution(rec.pids, [], rec.explicit, rec.host),
         pids: [...rec.pids],
       });
     }
@@ -534,9 +581,16 @@ export class Collector extends EventEmitter {
     );
   }
 
-  /** Activity that counts toward the grade: the target's own, plus children only with --include-children. */
+  /** Activity that counts toward the grade: the target's own, plus children only with --include-children. Never unattributed. */
   private graded<T extends { attribution: AttributionKind }>(items: T[]): T[] {
-    return this.includeChildren ? items : items.filter((i) => i.attribution !== "child");
+    return items.filter((i) => i.attribution === "target" || (this.includeChildren && i.attribution === "child"));
+  }
+
+  /** Hosts whose owning process vanished before it could be resolved and that no observed child explains. */
+  unattributedHosts(): string[] {
+    return this.hostSummaries()
+      .filter((h) => h.attribution === "unattributed")
+      .map((h) => h.host);
   }
 
   score(): ScoreResult {

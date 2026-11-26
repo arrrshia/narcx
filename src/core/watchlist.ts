@@ -9,36 +9,47 @@ import type { WatchEntry } from "./types.js";
  * Glob syntax: `*` (no slash), `**` (any depth), `?` single char.
  */
 export const WATCHLIST: readonly WatchEntry[] = [
-  { id: "claude", label: "Claude Code config", patterns: ["~/.claude.json", "~/.claude/**"] },
-  { id: "codex", label: "Codex config", patterns: ["~/.codex/**"] },
-  { id: "cursor", label: "Cursor config", patterns: ["~/.cursor/**"] },
-  { id: "gemini", label: "Gemini CLI auth", patterns: ["~/.gemini/**"] },
-  { id: "opencode", label: "OpenCode config", patterns: ["~/.config/opencode/**", "~/.local/share/opencode/**"] },
-  { id: "gh", label: "GitHub CLI auth", patterns: ["~/.config/gh/**"] },
-  { id: "ssh", label: "SSH keys", patterns: ["~/.ssh/**"] },
-  { id: "aws", label: "AWS credentials", patterns: ["~/.aws/**"] },
-  { id: "gitconfig", label: "Git config", patterns: ["~/.gitconfig", "~/.config/git/credentials"] },
-  { id: "npmrc", label: "npm auth", patterns: ["~/.npmrc", ".npmrc"] },
-  { id: "netrc", label: "netrc credentials", patterns: ["~/.netrc", "~/_netrc"] },
-  { id: "pypirc", label: "PyPI credentials", patterns: ["~/.pypirc"] },
-  { id: "env", label: "dotenv secrets", patterns: [".env", ".env.*"] },
-  { id: "gnupg", label: "GPG keyring", patterns: ["~/.gnupg/**"] },
-  { id: "docker", label: "Docker auth", patterns: ["~/.docker/config.json"] },
-  { id: "kube", label: "Kubernetes config", patterns: ["~/.kube/**"] },
-  { id: "gcloud", label: "gcloud credentials", patterns: ["~/.config/gcloud/**"] },
+  // ---- secrets: files that actually hold keys, tokens or credentials (graded) ----
+  { id: "env", label: "dotenv secrets", kind: "secret", patterns: [".env", ".env.*"], exclude: [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.schema"] },
   {
-    id: "keychain",
-    label: "macOS keychain (TLS trust store)",
-    patterns: ["~/Library/Keychains/**", "/Library/Keychains/**"],
-    // Every process that evaluates a TLS certificate chain through Security.framework opens
-    // these files; secrets inside are only reachable through securityd. Reported, not graded.
-    graded: false,
+    id: "ssh",
+    label: "SSH private keys",
+    kind: "secret",
+    patterns: ["~/.ssh/**"],
+    exclude: ["*.pub", "known_hosts", "known_hosts.old", "known_hosts2", "config", "authorized_keys", "authorized_keys2", "environment", "rc", "~/.ssh"],
+  },
+  { id: "aws", label: "AWS credentials", kind: "secret", patterns: ["~/.aws/credentials", "~/.aws/sso/cache/**"] },
+  { id: "kube", label: "Kubernetes config", kind: "secret", patterns: ["~/.kube/config"] },
+  { id: "netrc", label: "netrc credentials", kind: "secret", patterns: ["~/.netrc", "~/_netrc"] },
+  { id: "npmrc", label: "npm auth", kind: "secret", patterns: ["~/.npmrc", ".npmrc"] },
+  { id: "pypirc", label: "PyPI credentials", kind: "secret", patterns: ["~/.pypirc"] },
+  { id: "docker", label: "Docker auth", kind: "secret", patterns: ["~/.docker/config.json"] },
+  { id: "git-credentials", label: "Git credentials", kind: "secret", patterns: ["~/.git-credentials", "~/.config/git/credentials"], owner: "gitconfig" },
+  { id: "gh", label: "GitHub CLI auth", kind: "secret", patterns: ["~/.config/gh/hosts.yml"] },
+  { id: "claude-creds", label: "Claude Code credentials", kind: "secret", patterns: ["~/.claude/.credentials.json"], owner: "claude" },
+  { id: "codex-creds", label: "Codex credentials", kind: "secret", patterns: ["~/.codex/auth.json"], owner: "codex" },
+  { id: "gemini-creds", label: "Gemini CLI credentials", kind: "secret", patterns: ["~/.gemini/oauth_creds.json"], owner: "gemini" },
+  { id: "gnupg-keys", label: "GPG private keys", kind: "secret", patterns: ["~/.gnupg/private-keys-v1.d/**", "~/.gnupg/secring.gpg"], owner: "gnupg" },
+  {
+    id: "gcloud-creds",
+    label: "gcloud credentials",
+    kind: "secret",
+    patterns: ["~/.config/gcloud/credentials.db", "~/.config/gcloud/access_tokens.db", "~/.config/gcloud/application_default_credentials.json", "~/.config/gcloud/legacy_credentials/**"],
+    owner: "gcloud",
+  },
+  {
+    id: "generic-secret",
+    label: "credential file",
+    kind: "secret",
+    // Generic secret file names, anywhere outside package/cache trees.
+    patterns: ["*credentials*", "*_creds.json", "*token*.json", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"],
+    exclude: ["*.pub", "package.json"],
   },
   {
     id: "browser",
     label: "Browser cookies/logins",
+    kind: "secret",
     patterns: [
-      // macOS
       "~/Library/Cookies/**",
       "~/Library/Application Support/Google/Chrome/**/Cookies",
       "~/Library/Application Support/Google/Chrome/**/Login Data",
@@ -49,17 +60,34 @@ export const WATCHLIST: readonly WatchEntry[] = [
       "~/Library/Application Support/Firefox/Profiles/**/cookies.sqlite",
       "~/Library/Application Support/Firefox/Profiles/**/logins.json",
       "~/Library/Safari/Cookies.binarycookies",
-      // Linux
       "~/.config/google-chrome/**/Cookies",
       "~/.config/chromium/**/Cookies",
       "~/.config/BraveSoftware/**/Cookies",
       "~/.mozilla/firefox/**/cookies.sqlite",
       "~/.mozilla/firefox/**/logins.json",
-      // Windows-ish paths seen through WSL/Git Bash
       "~/AppData/Local/Google/Chrome/User Data/**/Cookies",
     ],
   },
+  // ---- configs, prompts, caches and directory probes (shown with a CONFIG tag, never graded) ----
+  { id: "claude", label: "Claude Code config", kind: "config", patterns: ["~/.claude.json", "~/.claude/**"] },
+  { id: "codex", label: "Codex config", kind: "config", patterns: ["~/.codex/**"] },
+  { id: "cursor", label: "Cursor config", kind: "config", patterns: ["~/.cursor/**"] },
+  { id: "gemini", label: "Gemini CLI config", kind: "config", patterns: ["~/.gemini/**"] },
+  { id: "opencode", label: "OpenCode config", kind: "config", patterns: ["~/.config/opencode/**", "~/.local/share/opencode/**"] },
+  { id: "gh", label: "GitHub CLI config", kind: "config", patterns: ["~/.config/gh/**"] },
+  { id: "ssh", label: "SSH config", kind: "config", patterns: ["~/.ssh", "~/.ssh/config", "~/.ssh/known_hosts*", "~/.ssh/*.pub", "~/.ssh/authorized_keys*"] },
+  { id: "aws", label: "AWS config", kind: "config", patterns: ["~/.aws/**"] },
+  { id: "gitconfig", label: "Git config", kind: "config", patterns: ["~/.gitconfig", "~/.config/git/**"] },
+  { id: "gnupg", label: "GPG keyring", kind: "config", patterns: ["~/.gnupg/**"] },
+  { id: "docker", label: "Docker config", kind: "config", patterns: ["~/.docker/**"] },
+  { id: "kube", label: "Kubernetes config", kind: "config", patterns: ["~/.kube/**"] },
+  { id: "gcloud", label: "gcloud config", kind: "config", patterns: ["~/.config/gcloud/**"] },
+  // ---- system files every TLS-speaking process opens (reported, never graded) ----
+  { id: "keychain", label: "macOS keychain (TLS trust store)", kind: "system", patterns: ["~/Library/Keychains/**", "/Library/Keychains/**"] },
 ];
+
+/** Path fragments under which generic secret-looking names are build artefacts or caches, not credentials. */
+const GENERIC_SKIP = ["/node_modules/", "/.npm/_cacache/", "/.npm/_npx/", "/.cache/", "/Library/Caches/", "/.cargo/registry/", "/.rustup/", "/site-packages/", "/.pnpm/", "/.yarn/", "/.bun/install/"];
 
 function escapeRe(s: string): string {
   return s.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -101,6 +129,8 @@ interface Compiled {
   entry: WatchEntry;
   anchored: RegExp[];
   basename: RegExp[];
+  excludeAnchored: RegExp[];
+  excludeBasename: RegExp[];
 }
 
 export class SensitiveMatcher {
@@ -118,10 +148,10 @@ export class SensitiveMatcher {
       /* home may not exist yet */
     }
     this.homes = [...variants];
-    this.compiled = WATCHLIST.map((entry) => {
+    const compile = (patterns: readonly string[]) => {
       const anchored: RegExp[] = [];
       const basename: RegExp[] = [];
-      for (const p of entry.patterns) {
+      for (const p of patterns) {
         if (p.startsWith("~/")) {
           for (const h of this.homes) anchored.push(globToRegExp(path.join(h, p.slice(2))));
         } else if (p.includes("/")) {
@@ -130,7 +160,12 @@ export class SensitiveMatcher {
           basename.push(globToRegExp(p));
         }
       }
-      return { entry, anchored, basename };
+      return { anchored, basename };
+    };
+    this.compiled = WATCHLIST.map((entry) => {
+      const inc = compile(entry.patterns);
+      const exc = compile(entry.exclude ?? []);
+      return { entry, anchored: inc.anchored, basename: inc.basename, excludeAnchored: exc.anchored, excludeBasename: exc.basename };
     });
   }
 
@@ -143,12 +178,33 @@ export class SensitiveMatcher {
     return s;
   }
 
+  private hits(c: Compiled, p: string, base: string): boolean {
+    const excluded = c.excludeAnchored.some((re) => re.test(p)) || c.excludeBasename.some((re) => re.test(base));
+    if (excluded) return false;
+    if (c.anchored.some((re) => re.test(p))) return true;
+    if (c.basename.some((re) => re.test(base))) {
+      // Generic names (credentials, *.pem, *token*.json) are ignored inside package and cache trees.
+      if (c.entry.id === "generic-secret" && GENERIC_SKIP.some((frag) => p.includes(frag))) return false;
+      return true;
+    }
+    return false;
+  }
+
+  /** First matching entry; secrets are listed before configs, so a credential inside a config dir is a secret. */
   match(filePath: string): WatchEntry | null {
     const p = this.normalize(filePath);
     const base = path.basename(p);
+    for (const c of this.compiled) if (this.hits(c, p, base)) return c.entry;
+    return null;
+  }
+
+  /** The config namespace a path lives in (claude, codex, gemini, …), used for ownership. */
+  ownerOf(filePath: string): string | null {
+    const p = this.normalize(filePath);
+    const base = path.basename(p);
     for (const c of this.compiled) {
-      for (const re of c.anchored) if (re.test(p)) return c.entry;
-      for (const re of c.basename) if (re.test(base)) return c.entry;
+      if (c.entry.kind !== "config") continue;
+      if (this.hits(c, p, base)) return c.entry.id;
     }
     return null;
   }

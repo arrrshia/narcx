@@ -268,6 +268,16 @@ export class ProcessAttributor {
     return this.classify(rec.ppid).attribution === "target";
   }
 
+  /** Names (`via`) of external child CLIs seen in the tree so far. */
+  observedChildren(candidates: ProcRecord[]): Set<string> {
+    const out = new Set<string>();
+    for (const r of candidates) {
+      const a = this.classify(r.pid);
+      if (a.attribution === "child" && a.via) out.add(a.via);
+    }
+    return out;
+  }
+
   /** Classify by process name (for layers that only know the accounting name, like fs_usage). */
   classifyName(name: string, candidates: ProcRecord[]): ProcessAttribution | null {
     const matches = candidates.filter((r) => processLabel(r) === name || path.basename(r.exe) === name);

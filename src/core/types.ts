@@ -1,7 +1,14 @@
 export type HostCategory = "LLM_API" | "AUTH" | "TELEMETRY" | "USER_OTLP" | "UNKNOWN";
 
-/** Who did it: the audited tool (and its own bundled processes) or an external CLI it spawned. */
-export type AttributionKind = "target" | "child";
+/**
+ * Who did it: the audited tool (and its own bundled processes), an external CLI
+ * it spawned, or nobody we could pin down (short-lived connection whose pid
+ * vanished before lsof saw it). Only target activity is graded.
+ */
+export type AttributionKind = "target" | "child" | "unattributed";
+
+/** What a watchlist hit actually is: a credential (graded), a config/cache (shown, not graded) or a system file. */
+export type WatchKind = "secret" | "config" | "system";
 
 export interface ProcessAttribution {
   pid?: number;
@@ -99,8 +106,12 @@ export interface WatchEntry {
   label: string;
   /** Glob-ish patterns. "~/" prefix is relative to home. */
   patterns: string[];
-  /** False for files every TLS-speaking process opens (keychain trust store): reported, never graded. */
-  graded?: boolean;
+  /** secret = holds keys/tokens (graded); config = settings, prompts, caches (shown, never graded); system = trust store. */
+  kind: WatchKind;
+  /** Patterns (same syntax) that un-match, e.g. ".env.example" or "*.pub". */
+  exclude?: string[];
+  /** Namespace this entry belongs to for ownership (claude, codex, gemini, …) when it differs from the id. */
+  owner?: string;
 }
 
 export interface Deduction {
@@ -131,8 +142,10 @@ export interface FileSummary {
   exists: boolean;
   /** Processes that touched it (accounting names), e.g. ["codex", "git-remote-https"]. */
   procs: string[];
-  /** False when the watchlist entry is informational only (e.g. keychain trust store). */
+  /** False when the watchlist entry is informational only (config, cache, directory probe, trust store). */
   graded: boolean;
+  /** secret | config | system — see WatchKind. Directory probes are always config. */
+  kind: WatchKind;
   /** Whether the target itself or an external child process did this. Child activity is not graded. */
   attribution: AttributionKind;
   /** Child binary the activity belongs to (e.g. "claude"); empty for target activity. */
@@ -220,5 +233,7 @@ export interface AuditReport {
   userOtlpHosts: string[];
   /** Everything external child CLIs did, grouped by child binary. Excluded from the grade unless includeChildren. */
   childActivity: Record<string, ChildActivity>;
+  /** Hosts whose connection closed before the owning pid could be resolved and that no known child explains. Not graded. */
+  unattributedHosts: string[];
   events: AuditEvent[];
 }

@@ -159,12 +159,14 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
   p.push(hr(M, R, topRuleY, INK, 2));
 
   // ---- metrics strip (target only, unless --include-children) ----------------
-  const isGraded = (x: { attribution?: string }) => report.includeChildren || x.attribution !== "child";
+  const isGraded = (x: { attribution?: string }) => x.attribution === "target" || x.attribution === undefined || (report.includeChildren && x.attribution === "child");
   const hosts = report.hosts.filter((h) => !h.launcher && isGraded(h));
   const telemetry = hosts.filter((h) => h.category === "TELEMETRY");
   const other = hosts.filter((h) => h.category === "UNKNOWN");
-  const thirdParty = report.sensitiveFiles.filter((f) => !f.ownNamespace && !f.launcher && f.graded !== false && isGraded(f));
+  const isSecret = (f: FileSummary) => (f.kind ?? (f.graded === false ? "config" : "secret")) === "secret";
+  const thirdParty = report.sensitiveFiles.filter((f) => !f.ownNamespace && !f.launcher && isSecret(f) && isGraded(f));
   const children = report.includeChildren ? [] : Object.values(report.childActivity ?? {}).filter((c) => c.telemetryHosts.length + c.otherHosts.length + c.llmHosts.length + c.authHosts.length + c.filesAccessed.length > 0);
+  const unattributed = report.unattributedHosts ?? [];
   const untracedFiles = tracing.coverage === "none";
   const metrics: Array<{ label: string; value: string; hot: boolean; note?: string }> = [
     { label: "Telemetry hosts", value: String(telemetry.length), hot: telemetry.length > 0 },
@@ -202,7 +204,7 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
   const lx = M;
   const rx = M + cw + gap;
   const rowH = 36;
-  const maxRows = children.length ? 5 : 6; // leave room for the child-traffic callout
+  const maxRows = children.length || unattributed.length ? 5 : 6; // leave room for the callout
   const firstBaseline = colTop + 34;
 
   const header = (x: number, label: string, right?: string) => {
@@ -249,13 +251,15 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
     const who = tracing.untraced.length ? `: ${describeUntraced(tracing.untraced)}` : "";
     p.push(text(rx, firstBaseline, fit(`File reads not traced (native binary${who} — run with --deep)`, Math.floor(cw / (15 * CH))), { size: 15, family: MONO, fill: MUTED, italic: true }));
   } else {
-    const graded = (f: FileSummary) => f.graded !== false;
+    const kindOf = (f: FileSummary) => f.kind ?? (f.graded === false ? "config" : "secret");
     const mine = report.sensitiveFiles.filter(isGraded);
+    // Real third-party secrets first, then cross-tool configs, then own, launcher, system.
     const files: FileSummary[] = [
-      ...mine.filter((f) => !f.ownNamespace && !f.launcher && graded(f)),
-      ...mine.filter((f) => f.ownNamespace && !f.launcher && graded(f)),
-      ...mine.filter((f) => f.launcher && graded(f)),
-      ...mine.filter((f) => !graded(f)),
+      ...mine.filter((f) => !f.ownNamespace && !f.launcher && kindOf(f) === "secret"),
+      ...mine.filter((f) => !f.ownNamespace && !f.launcher && kindOf(f) === "config"),
+      ...mine.filter((f) => f.ownNamespace && !f.launcher && kindOf(f) !== "system"),
+      ...mine.filter((f) => f.launcher && kindOf(f) !== "system"),
+      ...mine.filter((f) => kindOf(f) === "system"),
     ];
     const partial = tracing.coverage === "partial";
     const rowsAvail = visibleCount(files.length, partial ? 1 : 0);
@@ -264,8 +268,9 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
     } else {
       files.slice(0, rowsAvail).forEach((f, i) => {
         const y = firstBaseline + rowH * i;
-        const tag = f.graded === false ? "TRUST STORE" : f.launcher ? launcher.toUpperCase() : f.ownNamespace ? "OWN" : "3RD-PARTY";
-        const hot = !f.launcher && !f.ownNamespace && f.graded !== false;
+        const k = kindOf(f);
+        const tag = k === "system" ? "TRUST STORE" : f.launcher ? launcher.toUpperCase() : f.ownNamespace ? "OWN" : k === "config" ? "CONFIG" : "3RD-PARTY";
+        const hot = !f.launcher && !f.ownNamespace && k === "secret";
         const tagW = monoW(tag.length, 12);
         const pathMax = Math.floor((cw - tagW - 24) / (15 * CH));
         p.push(text(rx, y, fitLeft(matcher.display(f.path), pathMax), { size: 15, family: MONO, fill: hot ? INK : MUTED }));
@@ -285,7 +290,7 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
   }
 
   // ---- child-traffic callout: understated, above the footer -------------------
-  if (children.length) {
+  if (children.length || unattributed.length) {
     const ranked = [...children].sort((a, b) => b.telemetryHosts.length - a.telemetryHosts.length || b.otherHosts.length - a.otherHosts.length);
     const spacing = 0.5;
     const maxChars = Math.floor((R - M) / (12 * CH + spacing));
@@ -298,11 +303,13 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
         return `via ${c.processName}: ${hostsShort.length ? hostsShort.join(", ") : "no telemetry"}${files}`;
       });
       if (ranked.length > shown.length) parts.push(`+${ranked.length - shown.length} more`);
-      return `CHILD TRAFFIC EXCLUDED FROM GRADE · ${parts.join(" · ")}`;
+      if (unattributed.length) parts.push(`unattributed: ${[...new Set(unattributed.map(vendorDomain))].join(", ")}`);
+      const head = ranked.length ? "CHILD TRAFFIC EXCLUDED FROM GRADE" : "EXCLUDED FROM GRADE";
+      return `${head} · ${parts.join(" · ")}`;
     };
     let callout = build(ranked.length, true);
     if (callout.length > maxChars) callout = build(ranked.length, false);
-    for (let n = ranked.length - 1; callout.length > maxChars && n >= 1; n--) callout = build(n, false);
+    for (let n = ranked.length - 1; callout.length > maxChars && n >= 0; n--) callout = build(n, false);
     p.push(hr(M, R, 561));
     p.push(text(M, 580, fit(callout, maxChars), { size: 12, family: MONO, fill: MUTED, spacing }));
   }

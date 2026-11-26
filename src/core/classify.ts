@@ -50,6 +50,7 @@ export const TELEMETRY_DOMAINS: readonly string[] = [
   "datadoghq.com",
   // vendor-specific metrics / experiment endpoints
   "ab.chatgpt.com",
+  "cafe.github.com",
   "play.googleapis.com",
   "statsigapi.net",
   "featuregates.org",
@@ -146,6 +147,30 @@ export function classifyRequest(host: string, path?: string): HostCategory {
     if (h === e.host && path.startsWith(e.pathPrefix)) return "TELEMETRY";
   }
   return base;
+}
+
+/**
+ * Hosts that belong to a specific, well-known child CLI. Used only when a
+ * connection's pid could not be resolved in time AND that child binary was
+ * observed in the audited process tree, so a fast-exiting `gh` ping is never
+ * pinned on the tool that spawned it.
+ */
+export const KNOWN_CHILD_HOSTS: ReadonlyArray<{ domain: string; owner: string }> = [
+  { domain: "cafe.github.com", owner: "gh" },
+  { domain: "datadoghq.com", owner: "claude" },
+  { domain: "grafana.net", owner: "claude" },
+  { domain: "api.anthropic.com", owner: "claude" },
+  { domain: "mcp-proxy.anthropic.com", owner: "claude" },
+  { domain: "ab.chatgpt.com", owner: "codex" },
+  { domain: "chatgpt.com", owner: "codex" },
+  { domain: "play.googleapis.com", owner: "gemini" },
+  { domain: "cloudcode-pa.googleapis.com", owner: "gemini" },
+];
+
+export function knownChildOwner(host: string): string | null {
+  const h = normalizeHost(host);
+  for (const e of KNOWN_CHILD_HOSTS) if (h === e.domain || h.endsWith("." + e.domain)) return e.owner;
+  return null;
 }
 
 export const CATEGORY_LABEL: Record<HostCategory, string> = {

@@ -29,12 +29,16 @@ describe("globToRegExp", () => {
 describe("SensitiveMatcher", () => {
   it("matches the credential watchlist under ~", () => {
     const cases: Array<[string, string]> = [
+      ["~/.claude/.credentials.json", "claude-creds"],
+      ["~/.codex/auth.json", "codex-creds"],
+      ["~/.gemini/oauth_creds.json", "gemini-creds"],
+      ["~/.git-credentials", "git-credentials"],
       ["~/.claude.json", "claude"],
       ["~/.claude/settings.json", "claude"],
       ["~/.claude/projects/x/y.jsonl", "claude"],
-      ["~/.codex/auth.json", "codex"],
+      ["~/.codex/config.toml", "codex"],
       ["~/.cursor/mcp.json", "cursor"],
-      ["~/.gemini/oauth_creds.json", "gemini"],
+      ["~/.gemini/settings.json", "gemini"],
       ["~/.config/opencode/auth.json", "opencode"],
       ["~/.local/share/opencode/auth.json", "opencode"],
       ["~/.config/gh/hosts.yml", "gh"],
@@ -45,10 +49,10 @@ describe("SensitiveMatcher", () => {
       ["~/.npmrc", "npmrc"],
       ["~/.netrc", "netrc"],
       ["~/.pypirc", "pypirc"],
-      ["~/.gnupg/private-keys-v1.d/abc.key", "gnupg"],
+      ["~/.gnupg/private-keys-v1.d/abc.key", "gnupg-keys"],
       ["~/.docker/config.json", "docker"],
       ["~/.kube/config", "kube"],
-      ["~/.config/gcloud/credentials.db", "gcloud"],
+      ["~/.config/gcloud/credentials.db", "gcloud-creds"],
       ["~/Library/Keychains/login.keychain-db", "keychain"],
       ["~/Library/Application Support/Google/Chrome/Default/Cookies", "browser"],
       ["~/Library/Application Support/Firefox/Profiles/abc.default/cookies.sqlite", "browser"],
@@ -60,19 +64,63 @@ describe("SensitiveMatcher", () => {
     }
   });
 
-  it("matches .env files anywhere, by basename", () => {
+  it("matches .env files anywhere, by basename, except templates", () => {
     expect(m.match("/srv/app/.env")?.id).toBe("env");
     expect(m.match("/srv/app/.env.local")?.id).toBe("env");
     expect(m.match("/srv/app/.env.production")?.id).toBe("env");
+    expect(m.match("/srv/app/.env.example")).toBeNull();
+    expect(m.match("/srv/app/.env.sample")).toBeNull();
+    expect(m.match("/srv/app/.env.template")).toBeNull();
     expect(m.match("/srv/app/env")).toBeNull();
     expect(m.match("/srv/app/.environment")).toBeNull();
     expect(m.match("/srv/app/.npmrc")?.id).toBe("npmrc");
   });
 
+  it("separates secrets from configs", () => {
+    const kind = (p: string) => m.match(p)?.kind;
+    expect(kind("~/.ssh/id_ed25519")).toBe("secret");
+    expect(kind("~/.ssh/id_rsa.pub")).toBe("config");
+    expect(kind("~/.ssh/known_hosts")).toBe("config");
+    expect(kind("~/.ssh/config")).toBe("config");
+    expect(kind("~/.ssh")).toBe("config");
+    expect(kind("~/.aws/credentials")).toBe("secret");
+    expect(kind("~/.aws/config")).toBe("config");
+    expect(kind("~/.kube/config")).toBe("secret");
+    expect(kind("~/.claude.json")).toBe("config");
+    expect(kind("~/.claude/settings.json")).toBe("config");
+    expect(kind("~/.claude/skills")).toBe("config");
+    expect(kind("~/.claude/.credentials.json")).toBe("secret");
+    expect(kind("~/.codex")).toBe("config");
+    expect(kind("~/.codex/models_cache.json")).toBe("config");
+    expect(kind("~/.codex/config.toml")).toBe("config");
+    expect(kind("~/.codex/auth.json")).toBe("secret");
+    expect(kind("~/.gemini/GEMINI.md")).toBe("config");
+    expect(kind("~/.gemini/google_accounts.json")).toBe("config");
+    expect(kind("~/.gemini/oauth_creds.json")).toBe("secret");
+    expect(kind("~/.gitconfig")).toBe("config");
+    expect(kind("~/Library/Keychains/login.keychain-db")).toBe("system");
+  });
+
+  it("flags generic secret file names outside package and cache trees", () => {
+    expect(m.match("/srv/app/service-account.pem")?.id).toBe("generic-secret");
+    expect(m.match("/srv/app/gcp_creds.json")?.id).toBe("generic-secret");
+    expect(m.match("/srv/app/refresh_token.json")?.id).toBe("generic-secret");
+    expect(m.match("/srv/app/server.key")?.id).toBe("generic-secret");
+    expect(m.match("/srv/app/node_modules/foo/test/credentials.json")).toBeNull();
+    expect(m.match("/Users/tester/.npm/_cacache/content-v2/sha512/ab/credentials")).toBeNull();
+    expect(m.match("/srv/app/server.key.pub")).toBeNull();
+  });
+
+  it("knows which config namespace a path lives in", () => {
+    expect(m.ownerOf("/Users/tester/.claude/.credentials.json")).toBe("claude");
+    expect(m.ownerOf("/Users/tester/.codex/auth.json")).toBe("codex");
+    expect(m.ownerOf("/srv/app/.env")).toBeNull();
+  });
+
   it("does not flag ordinary files or look-alikes", () => {
     expect(m.match("/Users/tester/project/src/index.ts")).toBeNull();
     expect(m.match("/Users/tester/.sshx/notes")).toBeNull();
-    expect(m.match("/Users/other/.ssh/id_rsa")).toBeNull();
+    expect(m.match("/Users/other/.ssh/id_rsa")?.id).toBe("generic-secret"); // another user's key is still a key
     expect(m.match("/Users/tester/.config/ghx/hosts.yml")).toBeNull();
     expect(m.match("/Users/tester/.config/shady-ai/settings.json")).toBeNull();
   });

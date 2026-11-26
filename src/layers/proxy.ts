@@ -59,6 +59,17 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
       if (pid) collector.setNetPid(id, pid);
     });
   };
+  /**
+   * Fast-exiting clients (a `gh` telemetry ping) close before lsof has run, so
+   * the upstream leg is held for up to HOLD_MS while the lookup is in flight:
+   * the client is still waiting on us, which keeps its socket ESTABLISHED.
+   */
+  const HOLD_MS = 80;
+  const holdForPid = (sock: net.Socket | null | undefined): Promise<void> => {
+    const p = sock ? lookups.get(sock) : undefined;
+    if (!p) return Promise.resolve();
+    return Promise.race([p.then(() => undefined), new Promise<void>((r) => setTimeout(r, HOLD_MS))]);
+  };
 
   const server = http.createServer((req, res) => {
     let target: URL;
@@ -96,6 +107,9 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
     }
     headers["connection"] = "close";
 
+    req.pause();
+    void holdForPid(req.socket).then(() => {
+    req.resume();
     const upstream = http.request(
       { host: up.host, port: up.port, method, path: pathq, headers, setHost: false },
       (upRes) => {
@@ -120,6 +134,7 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
     req.on("error", () => upstream.destroy());
     res.on("close", tick);
     req.pipe(upstream);
+    });
   });
 
   server.on("connect", (req, clientSocket: net.Socket, head: Buffer) => {
@@ -141,6 +156,8 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
     attribute(clientSocket, ev?.id);
 
     const up = opts.resolveUpstream?.(host, port) ?? { host, port };
+    void holdForPid(clientSocket).then(() => {
+    if (clientSocket.destroyed) return;
     const upstream = net.connect(up.port, up.host);
     track(upstream);
     upstream.setNoDelay(true);
@@ -174,6 +191,7 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
     clientSocket.on("error", teardown);
     clientSocket.on("close", teardown);
     upstream.on("close", teardown);
+    });
   });
 
   server.on("connection", (sock: net.Socket) => {

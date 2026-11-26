@@ -78,7 +78,7 @@ export function renderScorecard(report: AuditReport, opts: ScorecardOptions): st
   blank();
 
   // sensitive files (target only unless children are folded into the grade)
-  const isGraded = (x: { attribution?: string }) => report.includeChildren || x.attribution !== "child";
+  const isGraded = (x: { attribution?: string }) => x.attribution === "target" || x.attribution === undefined || (report.includeChildren && x.attribution === "child");
   const sens = report.sensitiveFiles.filter(isGraded);
   const tracing = report.fileTracing;
   section(`SENSITIVE FILES TOUCHED (${sens.length})`);
@@ -94,16 +94,19 @@ export function renderScorecard(report: AuditReport, opts: ScorecardOptions): st
         .map(([k, v]) => `${k}×${v}`)
         .join(" ");
       const disp = fitLeft(opts.matcher.display(f.path), pathW);
-      const quiet = f.ownNamespace || f.launcher || !f.graded;
+      const kind = f.kind ?? (f.graded === false ? "config" : "secret");
+      const quiet = f.ownNamespace || f.launcher || kind !== "secret";
       const who = f.procs.length ? ` · ${f.procs.slice(0, 3).join(", ")}` : "";
       const tag = f.launcher
         ? pc.dim(`via ${launcherName} · not graded`)
-        : !f.graded
+        : kind === "system"
           ? pc.dim(`${f.watch?.label ?? "system"} · not graded${who}`)
           : f.ownNamespace
             ? pc.cyan("OWN CONFIG") + pc.dim(` · not penalised${who}`)
-            : pc.dim((f.watch?.label ?? "") + who);
-      const mark = f.launcher || !f.graded ? pc.dim("○") : f.ownNamespace ? pc.cyan("○") : pc.red("●");
+            : kind === "config"
+              ? pc.dim(`CONFIG · ${f.watch?.label ?? ""} · not graded${who}`)
+              : pc.dim((f.watch?.label ?? "") + who);
+      const mark = f.launcher || kind !== "secret" ? pc.dim("○") : f.ownNamespace ? pc.cyan("○") : pc.red("●");
       row(`${mark} ${quiet ? pc.dim(disp) : pc.bold(pc.red(disp))}${" ".repeat(Math.max(1, pathW - disp.length + 2))}${tag} ${pc.dim(ops)}`);
     }
   }
@@ -138,6 +141,10 @@ export function renderScorecard(report: AuditReport, opts: ScorecardOptions): st
 
   // spawned external CLIs: fully transparent, excluded from the grade
   const children = Object.values(report.childActivity ?? {});
+  const unattributed = report.unattributedHosts ?? [];
+  if (unattributed.length) {
+    row(pc.dim(`  unattributed (connection closed before its process could be resolved; not graded): ${unattributed.join(", ")}`));
+  }
   if (children.length && !report.includeChildren) {
     section("SPAWNED CHILD PROCESSES (excluded from grade)");
     const byHost = new Map(report.hosts.map((h) => [h.host, h]));

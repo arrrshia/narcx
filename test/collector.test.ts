@@ -91,6 +91,84 @@ describe("Collector per-process ownership", () => {
   });
 });
 
+describe("Collector secrets vs configs", () => {
+  it("lists cross-tool configs, caches and directory probes with a CONFIG tag and no penalty", () => {
+    const c = mk();
+    for (const p of ["/Users/tester/.claude/skills", "/Users/tester/.claude/settings.json", "/Users/tester/.claude.json", "/Users/tester/.codex", "/Users/tester/.codex/models_cache.json", "/Users/tester/.gitconfig"]) {
+      c.addFile({ source: "preload", pid: 1, path: p, op: p.endsWith("skills") || p.endsWith(".codex") ? "promises.readdir" : "readFile" });
+    }
+    const files = c.sensitiveFiles();
+    expect(files).toHaveLength(6);
+    expect(files.every((f) => f.kind === "config" && f.graded === false && !f.ownNamespace)).toBe(true);
+    expect(c.score()).toMatchObject({ score: 100, grade: "A+", deductions: [] });
+  });
+
+  it("still grades real credential files", () => {
+    const c = mk();
+    for (const p of ["/Users/tester/.claude/.credentials.json", "/Users/tester/.codex/auth.json", "/Users/tester/.aws/credentials", "/Users/tester/project/.env"]) {
+      c.addFile({ source: "preload", pid: 1, path: p, op: "readFileSync" });
+    }
+    const files = c.sensitiveFiles();
+    expect(files.every((f) => f.kind === "secret" && f.graded)).toBe(true);
+    expect(c.score().deductions.map((d) => d.detail).sort()).toEqual(["~/.aws/credentials", "~/.claude/.credentials.json", "~/.codex/auth.json", "~/project/.env"]);
+    expect(c.score().score).toBe(0);
+  });
+
+  it("treats a tool's own credential store as own config", () => {
+    const c = mk(["codex"]);
+    c.addFile({ source: "preload", pid: 1, path: "/Users/tester/.codex/auth.json", op: "readFileSync" });
+    c.addFile({ source: "preload", pid: 1, path: "/Users/tester/.claude/.credentials.json", op: "readFileSync" });
+    expect(c.sensitiveFiles().map((f) => [f.path.split("/").pop(), f.ownNamespace, f.kind])).toEqual([
+      [".credentials.json", false, "secret"],
+      ["auth.json", true, "secret"],
+    ]);
+    expect(c.score().score).toBe(70);
+  });
+
+  it("never grades a directory probe even when the directory holds secrets", () => {
+    const c = mk();
+    c.addFile({ source: "preload", pid: 1, path: "/Users/tester/.ssh", op: "readdirSync" });
+    expect(c.sensitiveFiles()[0]).toMatchObject({ kind: "config", graded: false });
+    expect(c.score().score).toBe(100);
+  });
+});
+
+describe("Collector short-lived connections", () => {
+  it("hands an unresolved connection to a known child CLI that was seen in the tree", () => {
+    const c = mk();
+    c.setObservedChildren(() => new Set(["gh", "claude"]));
+    c.addNet({ source: "proxy", host: "cafe.github.com", port: 443, protocol: "https", method: "CONNECT" });
+    c.addNet({ source: "proxy", host: "http-intake.logs.us5.datadoghq.com", port: 443, protocol: "https", method: "CONNECT" });
+    const hosts = c.hostSummaries();
+    expect(hosts.map((h) => [h.host, h.category, h.attribution, h.via])).toEqual([
+      ["cafe.github.com", "TELEMETRY", "child", "gh"],
+      ["http-intake.logs.us5.datadoghq.com", "TELEMETRY", "child", "claude"],
+    ]);
+    expect(c.score().score).toBe(100);
+    expect(c.childActivity().gh?.telemetryHosts).toEqual(["cafe.github.com"]);
+  });
+
+  it("marks an unresolved connection unattributed, not target, when no known child explains it", () => {
+    const c = mk();
+    c.setObservedChildren(() => new Set(["codex"]));
+    c.addNet({ source: "proxy", host: "cafe.github.com", port: 443, protocol: "https", method: "CONNECT" });
+    c.addNet({ source: "proxy", host: "example.com", port: 443, protocol: "https", method: "CONNECT" });
+    expect(c.hostSummaries().map((h) => h.attribution)).toEqual(["unattributed", "unattributed"]);
+    expect(c.unattributedHosts().sort()).toEqual(["cafe.github.com", "example.com"]);
+    expect(c.score().score).toBe(100);
+  });
+
+  it("keeps grading a host once its pid is known to be the target", () => {
+    const c = mk();
+    c.setAttributor((pid) => ({ pid, processName: "t3", attribution: "target", via: "" }));
+    c.setObservedChildren(() => new Set(["gh"]));
+    const ev = c.addNet({ source: "proxy", host: "cafe.github.com", port: 443, protocol: "https", method: "CONNECT" })!;
+    c.setNetPid(ev.id, 7);
+    expect(c.hostSummaries()[0]!.attribution).toBe("target");
+    expect(c.score().score).toBe(75);
+  });
+});
+
 describe("Collector loopback, dedup and auth rules", () => {
   it("never records loopback as an outbound host", () => {
     const c = mk();
@@ -162,7 +240,7 @@ describe("Collector launcher attribution", () => {
 
   it("does nothing without a launcher", () => {
     const c = mk();
-    c.addFile({ source: "preload", pid: 100, path: "/Users/tester/.gitconfig", op: "readFileSync" });
+    c.addFile({ source: "preload", pid: 100, path: "/Users/tester/.netrc", op: "readFileSync" });
     expect(c.sensitiveFiles()[0]!.launcher).toBe(false);
     expect(c.score().score).toBe(70);
   });

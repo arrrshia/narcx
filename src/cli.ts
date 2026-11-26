@@ -203,6 +203,7 @@ function loadReport(file: string, opts: Options): { src: string; report: AuditRe
     untraced: [],
   };
   report.childActivity ??= {};
+  report.unattributedHosts ??= [];
   report.userOtlpHosts ??= [];
   report.includeChildren ??= false;
   report.installRoot ??= null;
@@ -212,6 +213,7 @@ function loadReport(file: string, opts: Options): { src: string; report: AuditRe
     f.attribution ??= "target";
     f.via ??= "";
     f.processName ??= f.procs[0] ?? "";
+    f.kind ??= f.graded === false ? (f.watch?.id === "keychain" ? "system" : "config") : "secret";
   }
   for (const h of [...report.hosts, ...report.suppressedHosts]) {
     h.attribution ??= "target";
@@ -222,7 +224,7 @@ function loadReport(file: string, opts: Options): { src: string; report: AuditRe
   return { src, report };
 }
 
-function explicitAttribution(e: { processName?: string; attribution?: "target" | "child"; via?: string }) {
+function explicitAttribution(e: { processName?: string; attribution?: "target" | "child" | "unattributed"; via?: string }) {
   return e.attribution ? { processName: e.processName ?? "", attribution: e.attribution, via: e.via ?? "" } : undefined;
 }
 
@@ -274,6 +276,7 @@ async function regradeFromJson(opts: Options): Promise<void> {
   report.hosts = collector.hostSummaries();
   report.suppressedHosts = collector.suppressedHosts();
   report.childActivity = collector.childActivity();
+  report.unattributedHosts = collector.unattributedHosts();
   report.includeChildren = includeChildren;
   report.userOtlpHosts = [...userOtlp];
   report.score = collector.score();
@@ -458,12 +461,9 @@ async function main(): Promise<void> {
   for (const r of helloRecords.values()) attributor.register(r);
   const att = attributor;
   collector.setAttributor((pid) => att.classify(pid));
-  collector.setNameAttributor((name) =>
-    att.classifyName(
-      name,
-      tree.seenProcesses().map((p) => ({ pid: p.pid, ppid: p.ppid, exe: p.comm, args: p.args })),
-    ),
-  );
+  const seenRecs = () => tree.seenProcesses().map((p) => ({ pid: p.pid, ppid: p.ppid, exe: p.comm, args: p.args }));
+  collector.setNameAttributor((name) => att.classifyName(name, seenRecs()));
+  collector.setObservedChildren(() => att.observedChildren(seenRecs()));
   if (opts.verbose) log(`target: ${att.target.identity} · install root: ${att.target.root ?? "(none)"}`);
 
   tree.setRoot(child.pid!);
@@ -573,6 +573,7 @@ async function main(): Promise<void> {
     includeChildren: opts.includeChildren,
     userOtlpHosts: userOtlp,
     childActivity: collector.childActivity(),
+    unattributedHosts: collector.unattributedHosts(),
     events: collector.events,
   };
 

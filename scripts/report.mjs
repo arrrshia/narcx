@@ -77,14 +77,16 @@ function hostLabel(h) {
 function filesCell(report) {
   if (report.fileTracing && report.fileTracing.coverage === "none") return "_not traced (native binary; run `--deep`)_";
   report = { ...report, sensitiveFiles: (report.sensitiveFiles ?? []).filter((f) => report.includeChildren || f.attribution !== "child") };
-  const graded = (f) => f.graded !== false;
+  const kindOf = (f) => f.kind ?? (f.graded === false ? "config" : "secret");
   const list = (arr, max = 8) => arr.slice(0, max).map((f) => `\`${tilde(f.path)}\``).join(", ") + (arr.length > max ? ` _+${arr.length - max} more_` : "");
-  const viaLauncher = report.sensitiveFiles.filter((f) => f.launcher && graded(f));
-  const own = report.sensitiveFiles.filter((f) => !f.launcher && f.ownNamespace && graded(f));
-  const third = report.sensitiveFiles.filter((f) => !f.launcher && !f.ownNamespace && graded(f));
-  const ungraded = report.sensitiveFiles.filter((f) => !graded(f));
+  const viaLauncher = report.sensitiveFiles.filter((f) => f.launcher && kindOf(f) !== "system");
+  const own = report.sensitiveFiles.filter((f) => !f.launcher && f.ownNamespace && kindOf(f) !== "system");
+  const third = report.sensitiveFiles.filter((f) => !f.launcher && !f.ownNamespace && kindOf(f) === "secret");
+  const thirdConfig = report.sensitiveFiles.filter((f) => !f.launcher && !f.ownNamespace && kindOf(f) === "config");
+  const ungraded = report.sensitiveFiles.filter((f) => kindOf(f) === "system");
   const parts = [];
-  if (third.length) parts.push(`**third-party (${third.length}):** ` + third.map((f) => `\`${tilde(f.path)}\`${f.procs?.length ? ` (${f.procs.slice(0, 2).join(", ")})` : ""}`).join(", "));
+  if (third.length) parts.push(`**third-party secrets (${third.length}):** ` + third.map((f) => `\`${tilde(f.path)}\`${f.procs?.length ? ` (${f.procs.slice(0, 2).join(", ")})` : ""}`).join(", "));
+  if (thirdConfig.length) parts.push(`third-party config, not graded (${thirdConfig.length}): ` + thirdConfig.map((f) => `\`${tilde(f.path)}\`${f.procs?.length ? ` (${f.procs.slice(0, 2).join(", ")})` : ""}`).join(", "));
   if (own.length) {
     const byProc = new Map();
     for (const f of own) {
@@ -120,7 +122,7 @@ for (const { id, t, report } of rows) {
     lines.push(`| ${md(name)} | ${md(t.runtime ?? "")} | — | — | — | — | ${t.skipped ? `_skipped: ${md(t.skipped)}_` : "_no report_"} |`);
     continue;
   }
-  const own = (h) => report.includeChildren || h.attribution !== "child";
+  const own = (h) => h.attribution === "target" || h.attribution === undefined || (report.includeChildren && h.attribution === "child");
   const tel = report.hosts.filter((h) => h.category === "TELEMETRY" && own(h));
   const other = [...report.hosts.filter((h) => h.category !== "TELEMETRY" && !h.launcher && own(h)), ...report.hosts.filter((h) => h.category !== "TELEMETRY" && h.launcher && own(h))];
   const children = report.includeChildren ? [] : Object.values(report.childActivity ?? {});
@@ -139,8 +141,10 @@ for (const { id, t, report } of rows) {
         : "");
   const otherCell = other.length ? other.map((h) => hostLabel(h) + (h.category === "UNKNOWN" ? "" : ` — ${CAT[h.category]}`)).join("<br>") : "none";
   const suppCell = suppressed.length ? `<br>_raw IPs seen only by lsof, not graded (dedup): ${suppressed.map((h) => `\`${h.host}\``).join(", ")}_` : "";
+  const unatt = report.unattributedHosts ?? [];
+  const unattCell = unatt.length ? `<br>_unattributed (connection closed before its process could be resolved), not graded: ${unatt.map((h) => `\`${h}\``).join(", ")}_` : "";
   lines.push(
-    `| ${md(name)} | ${md(t.runtime)} | ${mode} | ${tel.length ? tel.map(hostLabel).join("<br>") : "none"} | ${otherCell}${suppCell}${childCell} | ${filesCell(report)} | **${report.score.grade}** (${report.score.score}/100) |`,
+    `| ${md(name)} | ${md(t.runtime)} | ${mode} | ${tel.length ? tel.map(hostLabel).join("<br>") : "none"} | ${otherCell}${suppCell}${unattCell}${childCell} | ${filesCell(report)} | **${report.score.grade}** (${report.score.score}/100) |`,
   );
 }
 lines.push("");
@@ -154,6 +158,8 @@ lines.push("- npm-distributed targets (T3 Code, Gemini CLI) were installed once 
 lines.push("- Loopback traffic (`127.0.0.1`, `::1`, `localhost`) is never counted as an outbound host. Raw IPs seen only by the lsof socket poller while the proxy was already naming hosts are listed as *dedup* and not graded, since they are almost always the same connections.");
 lines.push("- Host categories: **telemetry** (analytics / error-reporting / metrics vendors, including `ab.chatgpt.com` and `play.googleapis.com`) costs 25 points each; **other** (unclassified) costs 10; **LLM** backends (`api.anthropic.com`, `mcp-proxy.anthropic.com`, `chatgpt.com`, `api.openai.com`, Google Gemini endpoints, …) and **auth** endpoints (`oauth2.googleapis.com`, `accounts.google.com`, …) cost nothing.");
 if (manifest.sandboxIsGitRepo) lines.push("- The sandbox is an empty git repository (`git init`) because `codex exec` refuses to run in an untrusted non-git directory.");
+lines.push("- Only files that actually hold credentials count as **third-party secrets** (`.env`, SSH private keys, `~/.aws/credentials`, `~/.netrc`, `~/.npmrc`, `~/.config/gh/hosts.yml`, another tool's credential store such as `~/.claude/.credentials.json`, `~/.codex/auth.json` or `~/.gemini/oauth_creds.json`, generic `*credentials*`/`*token*.json`/`*.pem`/`*.key` names). Another tool's settings, prompts, caches and directory listings (`~/.claude.json`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.codex`, …) are listed with a CONFIG tag and never graded.");
+lines.push("- A connection whose owning process exited before it could be resolved is attributed to a well-known child CLI only if that CLI was seen in the process tree (`cafe.github.com` → `gh`, Datadog/Grafana → `claude`); otherwise it is *unattributed* and not graded.");
 lines.push("- Files are attributed to the process that opened them. A helper reading its own config (`git` reading `~/.gitconfig`/`~/.netrc`, a spawned `codex` reading `~/.codex/**`) counts as *own config*; the audited tool reading another tool's files is third-party. macOS keychain files are opened by every TLS-speaking process for trust evaluation and are listed as *trust store*, never graded.");
 lines.push("- **Per-process attribution.** Every event is tied to the process that caused it. The audited tool and the processes it ships (wrapper scripts, bundled binaries, its own helpers) are *target*; any external CLI it spawns (`claude`, `codex`, `gemini`, `git`, `gh`, `npm`) is a *child*. Child activity is listed in full but excluded from the grade, so an orchestrator is not penalised for what the agents it launches do. `--include-children` folds it back in.");
 lines.push("- Hosts named in the user's own `OTEL_EXPORTER_OTLP_*` variables are tagged *user OTLP* and never penalised.");
