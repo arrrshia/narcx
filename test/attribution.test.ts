@@ -124,6 +124,12 @@ describe("ProcessAttributor", () => {
     expect(a.classifyName("nobody", [...procs.values()])).toBeNull();
   });
 
+  it("names version-string executables after their product directory", () => {
+    expect(processLabel({ exe: "/Users/u/.local/share/claude/versions/2.1.323", args: "" })).toBe("claude");
+    expect(processLabel({ exe: "/opt/foo/releases/v1.2.3/bin/2.0.0", args: "" })).toBe("foo");
+    expect(processLabel({ exe: "/usr/local/bin/codex", args: "codex exec" })).toBe("codex");
+  });
+
   it("labels interpreter processes by their script", () => {
     expect(processLabel({ exe: "/usr/local/bin/node", args: "node /usr/lib/node_modules/npm/bin/npm-cli.js view x" })).toBe("npm");
     expect(scriptOf("node --require /x/preload.cjs /srv/app/server.mjs")).toBe("/srv/app/server.mjs");

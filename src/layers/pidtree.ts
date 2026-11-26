@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import * as path from "node:path";
-import { processLabel } from "../process-attribution.js";
+import { nameFromPath, processLabel } from "../process-attribution.js";
 
 export interface ProcInfo {
   pid: number;
@@ -80,7 +80,8 @@ export class PidTree {
    * case the script it runs names it (`node npm-cli.js` -> `npm`).
    */
   static displayName(p: ProcInfo): string {
-    const exe = path.basename(p.comm.split(" ")[0] ?? p.comm);
+    const exePath = p.comm.split(" ")[0] ?? p.comm;
+    const exe = /^v?\d+(\.\d+)+/.test(path.basename(exePath)) ? nameFromPath(exePath) : path.basename(exePath);
     const base = !p.ucomm || /^[\d.]+$/.test(p.ucomm) ? exe : p.ucomm;
     // Interpreters are named by the script they run (`node npm-cli.js` -> `npm`).
     const label = processLabel({ exe: p.comm, args: p.args });

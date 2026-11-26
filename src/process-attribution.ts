@@ -77,9 +77,29 @@ function stripExt(name: string): string {
   return name.replace(/\.(c|m)?js$|\.py$|\.rb$|\.pl$|\.sh$|\.ts$/, "");
 }
 
+const GENERIC_DIRS = new Set(["bin", "sbin", "lib", "libexec", "dist", "build", "out", "versions", "version", "releases", "release", "current", "Contents", "MacOS", "Resources", "Frameworks", "Helpers", "node_modules", ".bin", "vendor", "target", "debug"]);
+const isVersionLike = (s: string) => /^v?\d+(\.\d+)+([-+][\w.]+)?$/.test(s);
+
+/**
+ * `~/.local/share/claude/versions/2.1.323` is named "claude": when the file
+ * name is a version string, walk up past generic directories to the first
+ * segment that reads like a product name (a leading dot is dropped).
+ */
+export function nameFromPath(p: string): string {
+  const segs = p.split(/[\\/]+/).filter(Boolean);
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i]!.replace(/^\./, "");
+    if (!seg || isVersionLike(seg) || GENERIC_DIRS.has(segs[i]!) || /^[a-z0-9]{6,}-[a-z0-9-]+$/i.test(seg) && /^(darwin|linux|win|x64|arm|aarch)/i.test(seg) === false && seg.length > 24) continue;
+    if (/^(x64|arm64|aarch64|darwin|linux|win32)(-[\w.]+)*$/i.test(seg)) continue;
+    return seg;
+  }
+  return path.basename(p);
+}
+
 /** Clean short label for a process: script name for interpreters, else the executable name. */
 export function processLabel(rec: Pick<ProcRecord, "exe" | "args">): string {
-  const exe = cleanPsName(path.basename(rec.exe.split(" ")[0] ?? rec.exe));
+  const exePath = cleanPsName(rec.exe.split(" ")[0] ?? rec.exe);
+  const exe = isVersionLike(path.basename(exePath)) ? nameFromPath(exePath) : path.basename(exePath);
   if (isInterpreter(exe)) {
     const script = rec.args ? scriptOf(rec.args) : null;
     if (script) {

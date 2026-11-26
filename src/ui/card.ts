@@ -286,14 +286,25 @@ export function renderCardSvg(report: AuditReport, matcher: SensitiveMatcher): s
 
   // ---- child-traffic callout: understated, above the footer -------------------
   if (children.length) {
-    const parts = children.map((c) => {
-      const hostsShort = [...new Set([...c.telemetryHosts, ...c.otherHosts].map(vendorDomain))];
-      const files = c.filesAccessed.length ? ` (+${c.filesAccessed.length} file${c.filesAccessed.length === 1 ? "" : "s"})` : "";
-      return `via ${c.processName}: ${hostsShort.length ? hostsShort.join(", ") : "no telemetry"}${files}`;
-    });
-    const callout = `CHILD TRAFFIC EXCLUDED FROM GRADE · ${parts.join(" · ")}`;
+    const ranked = [...children].sort((a, b) => b.telemetryHosts.length - a.telemetryHosts.length || b.otherHosts.length - a.otherHosts.length);
+    const spacing = 0.5;
+    const maxChars = Math.floor((R - M) / (12 * CH + spacing));
+    // Degrade gracefully: all children with file counts -> without file counts -> fewer children -> ellipsis.
+    const build = (count: number, withFiles: boolean) => {
+      const shown = ranked.slice(0, count);
+      const parts = shown.map((c) => {
+        const hostsShort = [...new Set([...c.telemetryHosts, ...c.otherHosts].map(vendorDomain))];
+        const files = withFiles && c.filesAccessed.length ? ` (+${c.filesAccessed.length} file${c.filesAccessed.length === 1 ? "" : "s"})` : "";
+        return `via ${c.processName}: ${hostsShort.length ? hostsShort.join(", ") : "no telemetry"}${files}`;
+      });
+      if (ranked.length > shown.length) parts.push(`+${ranked.length - shown.length} more`);
+      return `CHILD TRAFFIC EXCLUDED FROM GRADE · ${parts.join(" · ")}`;
+    };
+    let callout = build(ranked.length, true);
+    if (callout.length > maxChars) callout = build(ranked.length, false);
+    for (let n = ranked.length - 1; callout.length > maxChars && n >= 1; n--) callout = build(n, false);
     p.push(hr(M, R, 561));
-    p.push(text(M, 580, fit(callout, Math.floor((R - M) / (12 * CH))), { size: 12, family: MONO, fill: MUTED, spacing: 0.5 }));
+    p.push(text(M, 580, fit(callout, maxChars), { size: 12, family: MONO, fill: MUTED, spacing }));
   }
 
   // ---- footer ----------------------------------------------------------------

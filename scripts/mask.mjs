@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NARC = path.join(ROOT, "dist", "cli.js");
 const args = process.argv.slice(2);
+const FROM_RAW = args.includes("--from-raw"); // restart from the unmasked originals (e.g. after widening the allow-list)
 const i = args.indexOf("--out");
 const OUT = path.resolve(i >= 0 && args[i + 1] ? args[i + 1] : path.join(ROOT, "audit-results"));
 const RAW = path.join(OUT, "raw");
@@ -58,7 +59,9 @@ try {
 for (const h of new Set([HOME, REAL_HOME])) {
   // A home prefix glued onto an already-absolute path (an fs_usage column artifact) is one home, not two.
   RULES.push([new RegExp(escapeRe(h) + escapeRe(h) + "(?=/|$)", "g"), h]);
-  RULES.push([new RegExp("(?<![~\\w])" + escapeRe(h) + "(?=/|$)", "g"), "~"]);
+  // No lookbehind: in pty logs the path can follow an ANSI colour code ("\x1b[36m/Users/…").
+  // A home prefix already turned into "~/Users/<user>" is collapsed by the rule below.
+  RULES.push([new RegExp(escapeRe(h) + "(?=/|$)", "g"), "~"]);
 }
 RULES.push([/~\/Users\/[^/\s"]+(?=\/|$)/g, "~"]);
 RULES.push([/~\/home\/[^/\s"]+(?=\/|$)/g, "~"]);
@@ -71,6 +74,16 @@ const keepRaw = (file) => {
   if (!fs.existsSync(dst) || fs.statSync(file).mtimeMs > fs.statSync(dst).mtimeMs + 1000) fs.copyFileSync(file, dst);
 };
 
+if (FROM_RAW && fs.existsSync(RAW)) {
+  // Restore originals only where they belong to the current run: a source newer than its
+  // raw copy is a fresh audit whose original has not been captured yet, so leave it alone.
+  for (const name of fs.readdirSync(RAW)) {
+    if (!(name.endsWith(".json") || name.endsWith(".log"))) continue;
+    const src = path.join(OUT, name);
+    const rawFile = path.join(RAW, name);
+    if (!fs.existsSync(src) || fs.statSync(rawFile).mtimeMs >= fs.statSync(src).mtimeMs - 1000) fs.copyFileSync(rawFile, src);
+  }
+}
 let changed = 0;
 for (const name of fs.readdirSync(OUT)) {
   const file = path.join(OUT, name);
@@ -86,6 +99,19 @@ for (const name of fs.readdirSync(OUT)) {
         touched++;
       }
     };
+    const walkStrings = (v) => {
+      if (typeof v === "string") return mask(v);
+      if (Array.isArray(v)) return v.map(walkStrings);
+      if (v && typeof v === "object") { for (const k of Object.keys(v)) v[k] = walkStrings(v[k]); return v; }
+      return v;
+    };
+    // Generic rules (home dir, plugin names, UUIDs) apply to every string in the report;
+    // hostnames never contain those patterns, so they are untouched.
+    {
+      const before = JSON.stringify(report);
+      walkStrings(report);
+      if (JSON.stringify(report) !== before) touched++;
+    }
     for (const f of report.sensitiveFiles ?? []) apply(f, "path");
     for (const f of report.otherDotfiles ?? []) apply(f, "path");
     for (const e of report.events ?? []) if (e.kind === "file") apply(e, "path");
@@ -93,7 +119,12 @@ for (const name of fs.readdirSync(OUT)) {
     for (const d of report.score?.deductions ?? []) apply(d, "detail");
     // Process names: keep the audited tool, well-known agents and helpers; anything else
     // (the user's own MCP servers, for instance) becomes <process>.
-    const KNOWN = new Set(["claude", "codex", "gemini", "t3", "t3-resource-moni", "t3-resource-monitor", "cursor", "cursor-agent", "opencode", "node", "bun", "git", "git-remote-https", "git-remote-http", "git-credential-osxkeychain", "curl", "sh", "bash", "zsh", "python3", "python", "uv", "npm", "npx", "ssh", "rg", "ripgrep"]);
+    const KNOWN = new Set([
+      "claude", "claude-code", "codex", "codex-code-mode-host", "gemini", "t3", "t3-resource-moni", "t3-resource-monitor", "cursor", "cursor-agent", "opencode", "aider", "copilot", "amp", "goose", "cline", "droid",
+      "node", "nodejs", "bun", "bunx", "deno", "git", "git-remote-https", "git-remote-http", "git-credential-osxkeychain", "git-lfs", "gh", "curl", "wget", "sh", "bash", "zsh", "fish", "dash",
+      "python3", "python", "uv", "uvx", "pip", "pip3", "pipx", "npm", "npx", "pnpm", "yarn", "corepack", "ssh", "ssh-agent", "scp", "rsync", "rg", "ripgrep", "fzf", "jq", "docker", "aws", "gcloud", "kubectl", "helm",
+      "cargo", "rustc", "go", "make", "cmake", "swift", "xcodebuild", "open", "osascript", "security", "ps", "lsof", "unknown",
+    ]);
     const lead = path.basename((report.command ?? [])[0] ?? "");
     const okName = (n) => KNOWN.has(n) || n === lead || n === "<process>";
     const maskProcs = (arr) => {

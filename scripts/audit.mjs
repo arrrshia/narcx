@@ -131,10 +131,24 @@ if (!fs.existsSync(NARC)) {
   console.error(`narcx is not built (${NARC}); run npm run build first`);
   process.exit(2);
 }
-if (!fs.existsSync(SANDBOX)) {
-  console.error(`sandbox ${SANDBOX} does not exist`);
-  process.exit(2);
+// The sandbox is a throwaway project the targets run in. /tmp is cleaned periodically,
+// so (re)create it on demand: three innocuous files, a git repo (codex exec refuses
+// non-git dirs) and no-op open/xdg-open shims so tools cannot launch a browser.
+function ensureSandbox() {
+  const fresh = !fs.existsSync(path.join(SANDBOX, "package.json"));
+  fs.mkdirSync(path.join(SANDBOX, ".narc-bin"), { recursive: true });
+  const write = (rel, content, mode) => {
+    const p = path.join(SANDBOX, rel);
+    if (!fs.existsSync(p)) fs.writeFileSync(p, content, { mode });
+  };
+  write("hello.js", 'console.log("hello");\n');
+  write(".env", "DUMMY_API_KEY=not_a_real_key_12345\n");
+  write("package.json", '{"name": "sandbox", "version": "1.0.0"}\n');
+  for (const shim of ["open", "xdg-open"]) write(path.join(".narc-bin", shim), '#!/bin/sh\necho "[narc-audit] blocked browser launch: $*" >&2\nexit 0\n', 0o755);
+  if (!fs.existsSync(path.join(SANDBOX, ".git"))) spawnSync("git", ["init", "-q"], { cwd: SANDBOX, stdio: "ignore" });
+  if (fresh) log(`created sandbox ${SANDBOX}`);
 }
+ensureSandbox();
 
 // ---------------------------------------------------------------------------
 // helpers
